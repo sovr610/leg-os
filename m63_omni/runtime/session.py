@@ -107,10 +107,14 @@ class Session:
         artifact_store: Optional[ArtifactStore] = None,
         announce_attach: bool = False,
         text_encoder: Optional[Callable[[str], Sequence[int]]] = None,
+        loop_passes: Optional[int] = None,
         _checkpoints: Optional[dict[str, Checkpoint]] = None,
     ) -> None:
         self.model = model
         self.text_encoder = text_encoder  # spells text timestamps (multimodal.timestamp_mode: text)
+        # Passes over the looped block for new state; a logged loop_passes note overrides it on replay.
+        self._base_passes = model.resolve_loop_passes(loop_passes, None)
+        self.loop_passes = self._base_passes
         self.tenant_id, self.session_id, self.branch_id = tenant_id, session_id, branch_id
         self.model_version = model.cfg.fingerprint()
         self.tokenizer_version = tokenizer_version
@@ -174,7 +178,7 @@ class Session:
         dev = self.model.embed.weight.device
         x = None if ids is None else torch.tensor([ids], dtype=torch.long, device=dev)
         out = self.model(x, inputs_embeds=embeds, modality_ids=modality_ids, cache=self.cache, use_cache=True,
-                         memory=memory, memory_enabled=self.memory_enabled)
+                         memory=memory, memory_enabled=self.memory_enabled, loop_passes=self.loop_passes)
         self.cache = out.cache
         self._last_logits = out.logits[:, -1]
         return out
@@ -331,7 +335,8 @@ class Session:
         logp = torch.log_softmax(self.next_logits()[0].float(), -1)[ids[0]].item()
         if len(ids) > 1:
             x = torch.tensor([ids[:-1]], device=self.model.embed.weight.device)
-            out = self.model(x, cache=self.cache, use_cache=True, memory=self._frozen(), memory_enabled=self.memory_enabled)
+            out = self.model(x, cache=self.cache, use_cache=True, memory=self._frozen(), memory_enabled=self.memory_enabled,
+                             loop_passes=self.loop_passes)
             lp = torch.log_softmax(out.logits[0].float(), -1)
             logp += float(lp[torch.arange(len(ids) - 1), torch.tensor(ids[1:])].sum())
         return logp
@@ -393,16 +398,46 @@ class Session:
         self._last_logits = None if cp.last_logits is None else cp.last_logits.clone()
         self._pending_assistant = []
 
+    def set_loop_passes(self, passes: int, *, reason: str = "think_harder") -> Optional[Event]:
+        """Switch how often the looped block runs, e.g. to "think harder" before escalating.
+
+        Earlier tokens have no cache for the other pass count, so the working
+        context and memory are rebuilt from the event log with the new count (a
+        re-prefill of the whole session). The switch is logged, so replay and
+        forks taken after it reproduce it. Returns the logged event, or None if
+        nothing changed.
+        """
+        self._alive()
+        self.model.resolve_loop_passes(passes, None)  # validates
+        if passes == self.loop_passes:
+            return None
+        self.commit_assistant()
+        ev = self.log.append("note", {"loop_passes": int(passes), "reason": reason}, branch_id=self.branch_id)
+        self._rebuild(self.branch_id, use_checkpoints=True)
+        self._checkpoint()
+        return ev
+
+    def think_harder(self) -> Optional[Event]:
+        """Run the looped block the maximum number of times for the rest of this session."""
+        return self.set_loop_passes(self.model.cfg.loop.max_passes if self.model.cfg.loop.enabled else 1)
+
     @torch.no_grad()
     def _rebuild(self, branch_id: str, *, use_checkpoints: bool) -> None:
-        """Restore the nearest checkpoint on ``branch_id``'s lineage, then replay later events."""
+        """Restore the nearest checkpoint on ``branch_id``'s lineage, then replay later events.
+
+        The whole replay runs at the pass count of the last ``loop_passes`` note in
+        the lineage (else the session default); checkpoints taken at another count
+        are skipped.
+        """
         lineage = list(self.log.replay(branch_id, tenant_id=self.tenant_id))
+        notes = [e.payload["loop_passes"] for e in lineage if e.kind == "note" and "loop_passes" in e.payload]
+        self.loop_passes = notes[-1] if notes else self._base_passes
         start = 0
         self._reset_state()
         if use_checkpoints:
             for i in range(len(lineage) - 1, -1, -1):
                 cp = self.checkpoints.get(lineage[i].event_id)
-                if cp is not None:
+                if cp is not None and (cp.cache is None or cp.cache.loop_passes == self.loop_passes):
                     self._restore(cp)
                     start = i + 1
                     break
@@ -448,7 +483,7 @@ class Session:
         child = Session(self.model, self.tenant_id, self.session_id, event_log=self.log, branch_id=branch,
                         tokenizer_version=self.tokenizer_version, memory_enabled=self.memory_enabled, clock=self.clock,
                         ttl_seconds=self.ttl, artifact_store=self.store, text_encoder=self.text_encoder,
-                        _checkpoints=self.checkpoints)
+                        loop_passes=self._base_passes, _checkpoints=self.checkpoints)
         child._rebuild(branch, use_checkpoints=True)
         child._checkpoint()
         return child
@@ -468,6 +503,7 @@ class Session:
         return {
             "model_version": self.model_version,
             "tokenizer_version": self.tokenizer_version,
+            "loop_passes": self.loop_passes,
             "event_id": None if head is None else head.event_id,
             "tenant_id": self.tenant_id,
             "states": _clone_mem(self.memory),
@@ -478,6 +514,8 @@ class Session:
             raise TenantIsolationError("memory snapshot belongs to another tenant")
         if snap.get("model_version") != self.model_version or snap.get("tokenizer_version") != self.tokenizer_version:
             raise IncompatibleSnapshotError("memory snapshot was produced by a different model/tokenizer version")
+        if snap.get("loop_passes", 1) != self.loop_passes:
+            raise IncompatibleSnapshotError("memory snapshot was written at a different loop pass count")
         self.memory = _clone_mem(snap["states"])
 
     def reset_memory(self) -> None:

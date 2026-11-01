@@ -137,6 +137,7 @@ def generate(
     generator: Optional[torch.Generator] = None,
     eos_id: Optional[int] = None,
     use_mtp_cache: bool = True,
+    loop_passes: Optional[int] = None,
 ) -> tuple[torch.Tensor, HybridCache, SpecStats]:
     """Generate for a single sequence (B=1). Returns (new token IDs [n], final cache, stats).
 
@@ -153,7 +154,8 @@ def generate(
     if memory is not None:
         frozen = {i: MemoryState(**{**s.__dict__, "frozen": True}) for i, s in memory.items()}
     stats = SpecStats()
-    out = model.forward(prompt_ids, cache=cache, use_cache=True, memory=frozen, memory_enabled=memory_enabled)
+    out = model.forward(prompt_ids, cache=cache, use_cache=True, memory=frozen, memory_enabled=memory_enabled,
+                        loop_passes=loop_passes)
     stats.target_forwards += 1
     cache = out.cache
     if draft_tokens and cache is not None and cache.next_pos != prompt_ids.shape[1]:

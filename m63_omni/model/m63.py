@@ -3,7 +3,9 @@
 48 pre-RMSNorm residual blocks arranged as 12 x ``[GDN, GDN, GDN, Gated GQA]``
 (``kda`` may replace ``gdn`` in the pattern for the proxy tournament);
 every block's mixer is followed by a sparse MoE FFN (64 routed + 1 shared,
-top-2). Embeddings are tied with the LM head. Neural-memory anchors sit at
+top-2). Embeddings are tied with the LM head. With ``loop.enabled`` a middle
+block of layers can run a second time with the same weights; each execution
+keeps its own cache slot (see :meth:`M63Config.loop_schedule`). Neural-memory anchors sit at
 attention layers 16/32/48 (1-indexed) and append their read tokens to that
 layer's attention context. Per block::
 
@@ -94,6 +96,7 @@ class ModelOutput:
     memory_loss: Optional[torch.Tensor] = None
     memory_states: Optional[dict[int, MemoryState]] = None
     memory_info: list = field(default_factory=list)
+    loop_passes: int = 1
 
     def router_aux_loss(self) -> torch.Tensor:
         return torch.stack([s.aux_loss for s in self.router_stats]).sum()
@@ -184,6 +187,19 @@ class M63Omni(nn.Module):
             if attn is not None:
                 a.backend = attn
 
+    def resolve_loop_passes(self, loop_passes: Optional[int], cache: Optional[HybridCache]) -> int:
+        """Pass count for a forward call: fixed by an existing cache, else ``loop_passes`` or the default."""
+        lp = self.cfg.loop
+        if cache is not None:
+            if loop_passes is not None and loop_passes != cache.loop_passes:
+                raise ValueError(f"this cache was built with {cache.loop_passes} loop pass(es); re-read the context "
+                                 f"(re-prefill) to run {loop_passes}")
+            passes = cache.loop_passes
+        else:
+            passes = loop_passes if loop_passes is not None else (lp.default_passes if lp.enabled else 1)
+        self.cfg.loop_schedule(passes)  # validates the count
+        return passes
+
     @torch.no_grad()
     def update_router_biases(self, stats: list[RouterStats]) -> None:
         """Apply the auxiliary-loss-free bias update from (globally reduced) per-layer loads."""
@@ -208,6 +224,7 @@ class M63Omni(nn.Module):
         gdn_mode: str = "auto",
         compute_logits: bool = True,
         compute_mtp: bool = False,
+        loop_passes: Optional[int] = None,
     ) -> ModelOutput:
         """Run the backbone.
 
@@ -215,7 +232,8 @@ class M63Omni(nn.Module):
         ``data.packing``), ``-100`` where no loss applies. ``memory`` maps anchor
         layer index -> :class:`MemoryState`; when omitted, anchors read from the
         learned initial state ``M0``. ``memory_enabled=False`` is the memory-off
-        fallback path (no memory tokens at all).
+        fallback path (no memory tokens at all). ``loop_passes`` selects how often
+        the looped block runs (fixed by ``cache`` once a session has started).
         """
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("pass exactly one of input_ids / inputs_embeds")
@@ -235,29 +253,35 @@ class M63Omni(nn.Module):
             mem_states = memory if memory is not None else {
                 i: self.memory[str(i)].initial_state_differentiable(B) for i in self.anchor_indices
             }
+        passes = self.resolve_loop_passes(loop_passes, cache)
+        schedule = self.cfg.loop_schedule(passes)
+        if cache is not None and len(cache.layers) != len(schedule):
+            raise ValueError(f"cache has {len(cache.layers)} state slots; {passes} loop pass(es) need {len(schedule)}")
         new_layers: list = []
-        stats: list[RouterStats] = []
+        by_layer: list[list[RouterStats]] = [[] for _ in self.blocks]
         anchor_hidden: dict[int, torch.Tensor] = {}
-        for i, block in enumerate(self.blocks):
+        for slot, i in enumerate(schedule):
+            block = self.blocks[i]
             extra = None
             if use_memory and i in mem_states:
                 extra = self.memory[str(i)].read(mem_states[i]).to(x.dtype)
-            state = cache.layers[i] if cache is not None else None
+            state = cache.layers[slot] if cache is not None else None
             x, new_state, st = block(x, idx, state, extra, modality_ids, valid, gdn_mode)
             new_layers.append(new_state)
-            stats.append(st)
+            by_layer[i].append(st)
             if use_memory and i in mem_states:
                 anchor_hidden[i] = x
+        stats = [s[0] if len(s) == 1 else _merge_stats(s) for s in by_layer]  # per layer, passes combined
         hidden_raw = x
         hidden = self.final_norm(x)
         out = ModelOutput(logits=None, hidden=hidden, hidden_raw=hidden_raw, router_stats=stats,
-                          anchor_hidden=anchor_hidden, stream=idx, memory_states=mem_states)
+                          anchor_hidden=anchor_hidden, stream=idx, memory_states=mem_states, loop_passes=passes)
         if use_cache or cache is not None:
             last_rope = idx.rope_pos[:, -1] + 1
             out.cache = HybridCache(layers=new_layers, next_pos=(cache.next_pos if cache else 0) + T,
                                     last_seg=idx.seg[:, -1].clone(), next_rope=last_rope,
                                     mtp=cache.mtp if cache is not None else None,
-                                    meta=dict(cache.meta) if cache is not None else {})
+                                    meta=dict(cache.meta) if cache is not None else {}, loop_passes=passes)
         if compute_logits or labels is not None:
             out.logits = self.logits(hidden)
         if labels is not None:
@@ -304,6 +328,7 @@ class M63Omni(nn.Module):
         reset_prob: float = 0.0,
         rng: Optional[random.Random] = None,
         compute_mtp: bool = False,
+        loop_passes: Optional[int] = None,
     ) -> ModelOutput:
         """Process an *unpacked* session sequence segment by segment (Stage D, §6, §8).
 
@@ -314,12 +339,13 @@ class M63Omni(nn.Module):
         teach forgetting as well as retention.
         """
         if not (self.cfg.memory.enabled and len(self.memory)):
-            return self.forward(input_ids, labels=labels, compute_mtp=compute_mtp)
+            return self.forward(input_ids, labels=labels, compute_mtp=compute_mtp, loop_passes=loop_passes)
+        passes = self.resolve_loop_passes(loop_passes, None)
         B, T = input_ids.shape
         S = segment_len or self.cfg.memory.update_segment_tokens
         rng = rng or random.Random(0)
         mem = memory if memory is not None else {i: self.memory[str(i)].initial_state_differentiable(B) for i in self.anchor_indices}
-        cache: Optional[HybridCache] = HybridCache.empty(len(self.blocks))
+        cache: Optional[HybridCache] = HybridCache.empty(len(self.cfg.loop_schedule(passes)), passes)
         logits, hidden, raw, stats_all, infos = [], [], [], [], []
         lm_sum = input_ids.new_zeros((), dtype=torch.float32)
         mtp_sum = input_ids.new_zeros((), dtype=torch.float32)
@@ -357,7 +383,7 @@ class M63Omni(nn.Module):
         merged_stats = [_merge_stats([s[l] for s in stats_all]) for l in range(len(self.blocks))]
         out = ModelOutput(
             logits=torch.cat(logits, dim=1), hidden=torch.cat(hidden, 1), hidden_raw=torch.cat(raw, 1),
-            router_stats=merged_stats, cache=cache, memory_states=mem, memory_info=infos,
+            router_stats=merged_stats, cache=cache, memory_states=mem, memory_info=infos, loop_passes=passes,
         )
         if labels is not None:
             out.lm_tokens = lm_tokens
@@ -371,6 +397,7 @@ class M63Omni(nn.Module):
     # ---------------------------------------------------------------- decode
     @torch.no_grad()
     def prefill(self, input_ids: torch.Tensor, memory: Optional[dict[int, MemoryState]] = None, **kw) -> ModelOutput:
+        """Prefill; pass ``loop_passes`` to choose the session's pass count (fixed for its cache)."""
         return self.forward(input_ids, use_cache=True, memory=memory, **kw)
 
     @torch.no_grad()

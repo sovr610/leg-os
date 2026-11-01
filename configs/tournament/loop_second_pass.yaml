@@ -1,0 +1,6 @@
+# Optional second pass: the middle half of the layers can run twice with shared weights. Trained with
+# 1 or 2 passes (50/50) so one checkpoint serves both; evaluated at every pass count. The proxy has
+# 16 layers, so the loop covers layers 5-12; memory is off because anchors must sit outside the loop.
+extends: ../proxy_1b3.yaml
+memory: {enabled: false}
+loop: {enabled: true, first_layer: 5, last_layer: 12, max_passes: 2, train_pass_probabilities: [0.5, 0.5]}

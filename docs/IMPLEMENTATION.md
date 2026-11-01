@@ -22,6 +22,7 @@ makes no capability claims**.
 | §11 Distributed layout, repository layout | `train/parallel.py`, `configs/*` | `tests/train/test_training.py::test_parallel_layouts`, `tests/test_config.py` |
 | §12 Build program / proxy tournament | `configs/proxy_*.yaml`, `configs/pilot.yaml`, `configs/tournament/*.yaml`, `configs/recommended.yaml` | `tests/test_manifest.py::test_pilot_and_proxy_sizes_in_blueprint_ranges` |
 | §13 Evaluation matrix & release gates | `eval/harness.py`, `eval/gates.py`, `eval/long_context.py`, `eval/efficiency.py`, `eval/security.py` | `tests/eval/test_eval.py` |
+| Optional second-pass loop | `config.LoopConfig`, `M63Config.loop_schedule`, `model/m63.py`, `runtime/session.py` (`think_harder`), `train/trainer.py` | `tests/model/test_loop.py`, `tests/runtime/test_planner.py`, `tests/train/test_tournament.py` |
 | Instruction-following parity gate (IFEval / BFCL vs text-only control) | `eval/ifeval.py`, `eval/bfcl.py`, `eval/parity.py`, `m63 parity`, `configs/text_control.yaml`, `data.mixture.text_control_budget` | `tests/eval/test_parity.py` |
 | §14 Serving & capacity | `runtime/paged_kv.py`, `runtime/prefix_cache.py`, `runtime/speculative.py`, `runtime/capacity.py` | `tests/runtime/*` |
 | Appendix A pseudocode (ingest / generate / fork) | `runtime/session.py` (`ingest`, `ingest_media`, `generate`, `fork`, `attach_branch`, `replay`) | `tests/runtime/test_session.py`, `tests/runtime/test_media_session.py` |
@@ -132,6 +133,21 @@ makes no capability claims**.
     parallel, parallel-multiple, irrelevance); scorer bias cancels in the paired comparison,
     but absolute numbers should come from the official evaluators. The margins are proposals
     to confirm at the pilot.
+18. **Optional second-pass loop** (`loop` config, off by default; after SenseNova-Loop, which runs
+    the middle of a converted Qwen3.5-9B twice). Layers `first_layer..last_layer` (whole hybrid
+    groups, the middle 24 of 48 by default) can run up to `max_passes` times with shared weights.
+    Every layer execution has its own cache slot, so a 2-pass session keeps 1.5x the KV and
+    recurrent state at the default range and spends about +50% active parameters per token
+    (4.95B -> 7.43B). Training draws the pass count per step (50/50 by default, seeded by step,
+    so resume is exact) and router statistics stay per layer with both passes counted. Sessions
+    start at `default_passes`; `Session.think_harder()` / `set_loop_passes()` logs a note and
+    re-prefills the whole session at the new count, since earlier tokens have no cache for it, and
+    replay and forks reproduce the switch. `PlannerConfig.think_harder_on_repair` switches before a
+    repair, i.e. before escalating to the flagship. Memory anchors must sit outside the loop, prefix
+    keys and memory snapshots carry the pass count, and capacity, training compute, the manifest,
+    the card, and the tournament (`loop_second_pass`, evaluated at each pass count under a FLOPs
+    budget that charges the expected extra pass) all account for it. Whether the second pass beats
+    spending the same compute elsewhere is untested.
 
 ## Design review
 

@@ -228,3 +228,19 @@ def test_regex_mask_is_fast_at_full_vocabulary_size():
         dec._allowed(c, cur)
     per_mask = (time.perf_counter() - t0) / 4
     assert per_mask < 0.25, per_mask
+
+
+def test_planner_thinks_harder_on_repair(tok):
+    import dataclasses
+
+    torch.manual_seed(0)
+    cfg = tiny(multimodal={"enabled": False}, model={"layers": 12}, memory={"anchors": [4, 12]},
+               loop={"enabled": True, "first_layer": 5, "last_layer": 8})
+    sess = Session(M63Omni(cfg).eval(), "t", "s")
+    planner = ModelPlanner(sess, tok, PlannerConfig(think_harder_on_repair=True))
+    reg = _registry()
+    planner(_bundle(reg))
+    assert sess.loop_passes == 1  # initial planning stays on the cheap path
+    parse_envelope(planner(dataclasses.replace(_bundle(reg, plan="s/main/run_x/plan_2"), mode="repair")))
+    assert sess.loop_passes == 2
+    assert [e.payload["loop_passes"] for e in sess.log.replay() if e.kind == "note" and "loop_passes" in e.payload] == [2]

@@ -112,6 +112,26 @@ class MTPConfig:
 
 
 @dataclass(frozen=True)
+class LoopConfig:
+    """Optional second pass over a middle block of layers with shared weights (off by default).
+
+    When enabled, layers ``first_layer..last_layer`` (1-indexed, whole hybrid
+    groups) can run up to ``max_passes`` times. Training samples the pass count
+    per step from ``train_pass_probabilities`` so one checkpoint serves every
+    count; a session runs ``default_passes`` and can switch to more ("think
+    harder") by re-reading its context. Each pass keeps its own KV cache and
+    recurrent state, so the looped layers' cache and compute scale with passes.
+    """
+
+    enabled: bool = False
+    first_layer: int = 13
+    last_layer: int = 36  # the middle 24 of 48 layers
+    max_passes: int = 2
+    train_pass_probabilities: tuple[float, ...] = (0.5, 0.5)  # P(1 pass), P(2 passes), ...
+    default_passes: int = 1
+
+
+@dataclass(frozen=True)
 class MultimodalConfig:
     enabled: bool = True
     # vision (shared by image and video)
@@ -194,6 +214,7 @@ class M63Config:
     moe: MoEConfig = field(default_factory=MoEConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     mtp: MTPConfig = field(default_factory=MTPConfig)
+    loop: LoopConfig = field(default_factory=LoopConfig)
     multimodal: MultimodalConfig = field(default_factory=MultimodalConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
@@ -205,6 +226,25 @@ class M63Config:
     def layer_kinds(self) -> list[str]:
         p = self.model.hybrid_pattern
         return [p[i % len(p)] for i in range(self.model.layers)]
+
+    def loop_schedule(self, passes: int = 1) -> list[int]:
+        """0-indexed layer executed at each step of one forward pass (a looped block repeats)."""
+        L, lp = self.model.layers, self.loop
+        if passes < 1 or passes > (lp.max_passes if lp.enabled else 1):
+            raise ConfigError(f"loop passes must be in 1..{lp.max_passes if lp.enabled else 1}, got {passes}")
+        if passes == 1:
+            return list(range(L))
+        s, e = lp.first_layer - 1, lp.last_layer
+        return list(range(e)) + list(range(s, e)) * (passes - 1) + list(range(e, L))
+
+    def execution_kinds(self, passes: int = 1) -> list[str]:
+        kinds = self.layer_kinds()
+        return [kinds[i] for i in self.loop_schedule(passes)]
+
+    def expected_train_passes(self) -> float:
+        if not self.loop.enabled:
+            return 1.0
+        return sum((k + 1) * p for k, p in enumerate(self.loop.train_pass_probabilities))
 
     def memory_anchor_indices(self) -> list[int]:
         """0-indexed layer indices that host a neural-memory anchor."""
@@ -359,6 +399,26 @@ def validate(cfg: M63Config) -> None:
     if cfg.mtp.enabled and not 0 <= cfg.mtp.draft_tokens <= cfg.mtp.layers:
         errs.append(f"mtp.draft_tokens must be in [0, mtp.layers={cfg.mtp.layers}]: a depth-{cfg.mtp.layers} MTP "
                     "was never trained to draft further (raise mtp.layers, optionally with share_weights)")
+    lp = cfg.loop
+    if lp.enabled:
+        P = len(m.hybrid_pattern)
+        if not 1 <= lp.first_layer <= lp.last_layer <= m.layers:
+            errs.append(f"loop layers must satisfy 1 <= first_layer <= last_layer <= {m.layers}")
+        elif (lp.first_layer - 1) % P or lp.last_layer % P:
+            errs.append(f"the loop must cover whole hybrid groups of {P} layers (first_layer = k*{P}+1, last_layer = j*{P})")
+        if lp.max_passes < 2:
+            errs.append("loop.max_passes must be >= 2 when the loop is enabled")
+        probs = lp.train_pass_probabilities
+        if len(probs) != lp.max_passes or any(p < 0 for p in probs) or abs(sum(probs) - 1.0) > 1e-6:
+            errs.append("loop.train_pass_probabilities needs one non-negative probability per pass count, summing to 1")
+        elif probs[0] <= 0 or probs[-1] <= 0:
+            errs.append("train with both 1 pass and max_passes, or the unused count is never learned")
+        if not 1 <= lp.default_passes <= lp.max_passes:
+            errs.append("loop.default_passes must be in 1..max_passes")
+        if mem.enabled and any(lp.first_layer <= a <= lp.last_layer for a in mem.anchors):
+            errs.append("memory anchors must lie outside the looped layers (each anchor reads and writes once)")
+    elif lp.default_passes != 1:
+        errs.append("loop.default_passes must be 1 while the loop is disabled")
     mm = cfg.multimodal
     if mm.enabled:
         frames_per_sec = 1000.0 / mm.hop_ms

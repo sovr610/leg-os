@@ -29,15 +29,18 @@ MiB = 1024**2
 DTYPE_BYTES = {"float32": 4, "bfloat16": 2, "float16": 2, "fp8": 1, "int4": 0.5}
 
 
-def kv_bytes_per_token(cfg: M63Config, dtype_bytes: float = 2) -> float:
-    """GQA KV bytes per token: layers x (K and V) x kv_heads x head_dim x bytes (48 KiB in the reference)."""
-    n_attn = sum(k == GATED_GQA for k in cfg.layer_kinds())
+def kv_bytes_per_token(cfg: M63Config, dtype_bytes: float = 2, loop_passes: int = 1) -> float:
+    """GQA KV bytes per token: layers x (K and V) x kv_heads x head_dim x bytes (48 KiB in the reference).
+
+    With ``loop_passes`` > 1 every pass over the looped block keeps its own KV.
+    """
+    n_attn = sum(k == GATED_GQA for k in cfg.execution_kinds(loop_passes))
     a = cfg.attention
     return n_attn * 2 * a.kv_heads * a.head_dim * dtype_bytes
 
 
-def kv_bytes(cfg: M63Config, tokens: int, dtype_bytes: float = 2) -> float:
-    return kv_bytes_per_token(cfg, dtype_bytes) * tokens
+def kv_bytes(cfg: M63Config, tokens: int, dtype_bytes: float = 2, loop_passes: int = 1) -> float:
+    return kv_bytes_per_token(cfg, dtype_bytes, loop_passes) * tokens
 
 
 def full_attention_kv_bytes_per_token(cfg: M63Config, dtype_bytes: float = 2) -> float:
@@ -54,9 +57,9 @@ def mtp_kv_bytes_per_token(cfg: M63Config, dtype_bytes: float = 2) -> float:
     return cfg.mtp.layers * 2 * a.kv_heads * a.head_dim * dtype_bytes
 
 
-def gdn_state_bytes(cfg: M63Config, dtype_bytes: float = 2, include_conv: bool = False) -> float:
-    """Recurrent (GDN and KDA) state per session (18 MiB at BF16 in the reference)."""
-    n_gdn = sum(k in RECURRENT_KINDS for k in cfg.layer_kinds())
+def gdn_state_bytes(cfg: M63Config, dtype_bytes: float = 2, include_conv: bool = False, loop_passes: int = 1) -> float:
+    """Recurrent (GDN and KDA) state per session (18 MiB at BF16 in the reference), per loop pass."""
+    n_gdn = sum(k in RECURRENT_KINDS for k in cfg.execution_kinds(loop_passes))
     g = cfg.gdn
     b = n_gdn * g.heads * g.key_dim * g.value_dim * dtype_bytes
     if include_conv:
@@ -102,6 +105,7 @@ def session_footprint(
     include_mtp: bool = False,
     state_checkpoints: int = 0,
     page_tokens: int = 0,
+    loop_passes: int = 1,
 ) -> SessionFootprint:
     """Per-session bytes. With only ``dtype_bytes`` this is the blueprint's lower bound (KV + state + memory).
 
@@ -109,7 +113,8 @@ def session_footprint(
     and memory state stay at >= 2 bytes (no engine stores them in FP8),
     ``include_mtp`` adds the MTP layers' KV, ``state_checkpoints`` adds that many
     recurrent-state snapshots (prefix-cache alignment points, branch heads), and
-    ``page_tokens`` rounds the KV up to whole pages.
+    ``page_tokens`` rounds the KV up to whole pages. ``loop_passes`` counts each
+    pass over the looped block as its own KV and recurrent state.
     """
     kv_b = dtype_bytes if kv_dtype_bytes is None else kv_dtype_bytes
     st_b = dtype_bytes if state_dtype_bytes is None else state_dtype_bytes
@@ -118,25 +123,25 @@ def session_footprint(
     if explicit_state and min(st_b, mem_b) < 2:
         raise ValueError("recurrent and memory state need >= 2 bytes per element (no FP8 state in any engine)")
     tokens = -(-context_tokens // page_tokens) * page_tokens if page_tokens else context_tokens
-    state = gdn_state_bytes(cfg, st_b, include_conv=include_conv)
+    state = gdn_state_bytes(cfg, st_b, include_conv=include_conv, loop_passes=loop_passes)
     return SessionFootprint(
         context_tokens,
-        kv=kv_bytes(cfg, tokens, kv_b),
+        kv=kv_bytes(cfg, tokens, kv_b, loop_passes),
         gdn=state,
         memory=memory_state_bytes(cfg, mem_b),
         mtp_kv=mtp_kv_bytes_per_token(cfg, kv_b) * tokens if include_mtp else 0.0,
-        checkpoints=state_checkpoints * gdn_state_bytes(cfg, st_b, include_conv=True),
+        checkpoints=state_checkpoints * gdn_state_bytes(cfg, st_b, include_conv=True, loop_passes=loop_passes),
     )
 
 
 def serving_footprint(cfg: M63Config, context_tokens: int, *, kv_dtype: str = "fp8", state_dtype: str = "bfloat16",
-                      checkpoint_every: int = 8192) -> SessionFootprint:
+                      checkpoint_every: int = 8192, loop_passes: int = 1) -> SessionFootprint:
     """The serving view used in ``docs/IMPROVEMENTS.md`` §8: FP8 KV, BF16 state, MTP KV, periodic checkpoints."""
     return session_footprint(
         cfg, context_tokens, kv_dtype_bytes=DTYPE_BYTES[kv_dtype], state_dtype_bytes=DTYPE_BYTES[state_dtype],
         memory_dtype_bytes=DTYPE_BYTES[state_dtype], include_conv=True, include_mtp=True,
         state_checkpoints=context_tokens // checkpoint_every if checkpoint_every else 0,
-        page_tokens=cfg.runtime.kv_block_tokens,
+        page_tokens=cfg.runtime.kv_block_tokens, loop_passes=loop_passes,
     )
 
 
@@ -242,7 +247,8 @@ def training_compute(
 ) -> TrainingCompute:
     """Corrected training-compute estimate for the curriculum ``stages`` (default: the §8 Stage A–D table).
 
-    * backbone: ``6 · N_active · D`` with the tied head included (the head runs on every position);
+    * backbone: ``6 · N_active · D`` with the tied head included (the head runs on every position), plus the
+      looped layers once more per expected extra pass (``loop.train_pass_probabilities``);
     * MTP: each depth runs its module and the tied head on every position (weights may be shared, compute is not);
     * attention: ``6 · n_ctx · d_q`` per GQA layer per position (Kaplan et al.'s causal term, x3 for training),
       with ``n_ctx`` the stage's mean packed length — an upper bound when document masking skips blocks;
@@ -255,14 +261,16 @@ def training_compute(
     m = manifest if manifest is not None else build_manifest(cfg)
     rows = _stage_rows(stages)
     D = sum(r[0] for r in rows)
-    backbone = 6.0 * m.active_incl_head * D
+    extra = cfg.expected_train_passes() - 1.0  # expected additional passes over the looped block per step
+    backbone = 6.0 * (m.active_incl_head + extra * m.loop_extra_active(cfg)) * D
     depth = cfg.mtp.layers if cfg.mtp.enabled else 0
     mtp_modules = 1 if cfg.mtp.share_weights else max(depth, 1)
     mtp_per_depth = m.resident["mtp"] / mtp_modules + m.head
     mtp = 6.0 * depth * mtp_per_depth * D
     a, g = cfg.attention, cfg.gdn
-    n_attn = sum(k == GATED_GQA for k in cfg.layer_kinds()) + depth
-    n_rec = sum(k in RECURRENT_KINDS for k in cfg.layer_kinds())
+    looped = _looped_kinds(cfg)
+    n_attn = sum(k == GATED_GQA for k in cfg.layer_kinds()) + extra * looped.count(GATED_GQA) + depth
+    n_rec = sum(k in RECURRENT_KINDS for k in cfg.layer_kinds()) + extra * sum(k in RECURRENT_KINDS for k in looped)
     qd = a.query_heads * a.head_dim
     attention = sum(6.0 * n_attn * ctx * qd * pos for pos, ctx, _ in rows)
     recurrent = 6.0 * n_rec * g.heads * (2 * g.train_chunk * g.key_dim + 3 * g.key_dim * g.value_dim) * D
@@ -272,6 +280,12 @@ def training_compute(
         visual_positions = sum(pos * vis for pos, _, vis in rows)
         encoders = (6.0 if encoders_trainable else 2.0) * vision * patches_per_visual_position * visual_positions
     return TrainingCompute(D, backbone, mtp, attention, recurrent, encoders)
+
+
+def _looped_kinds(cfg: M63Config) -> list[str]:
+    if not cfg.loop.enabled:
+        return []
+    return cfg.layer_kinds()[cfg.loop.first_layer - 1 : cfg.loop.last_layer]
 
 
 def _numel(shape: Sequence[int]) -> int:

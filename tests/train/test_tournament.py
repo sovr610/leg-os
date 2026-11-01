@@ -20,7 +20,7 @@ def test_every_tournament_variant_maps_onto_the_tiny_base():
     names = {c.name for c in cands}
     assert {"ratio_1to1", "ratio_3to1", "ratio_7to1", "full_attention_control", "memory_off", "top1", "top4",
             "no_shared_expert", "memory_decay_to_init", "kda", "kv_heads_half", "text_timestamps", "av_chunk_2s",
-            "recommended_defaults"} <= names
+            "recommended_defaults", "loop_second_pass"} <= names
     seven = next(c for c in cands if c.name == "ratio_7to1")
     assert seven.cfg.model.hybrid_pattern.count("gdn") == 7 and seven.cfg.memory.anchors == (8,)  # re-fitted
     assert next(c for c in cands if c.name == "memory_decay_to_init").cfg.memory.decay_target == "init"
@@ -30,6 +30,8 @@ def test_every_tournament_variant_maps_onto_the_tiny_base():
     rec = by["recommended_defaults"]
     assert rec.model.hybrid_pattern[0] == "kda" and not rec.memory.enabled and rec.multimodal.timestamp_mode == "text"
     assert rec.multimodal.av_chunk_ms == 2000 and rec.multimodal.audio_attention == "causal"
+    loop = by["loop_second_pass"].loop  # proxy range 5-12 does not fit 8 layers: re-fitted to the middle groups
+    assert loop.enabled and (loop.first_layer, loop.last_layer) == (1, 4)
 
 
 def test_matched_positions_metrics_and_pareto(tmp_path):
@@ -102,3 +104,12 @@ def test_multimodal_only_variants_are_skipped_not_ranked():
     assert "Skipped" in md and "text_timestamps" in md and "Not exercised" in md
     with pytest.raises(ValueError, match="skipped"):
         run_tournament(_cands("text_timestamps"), steps=1)
+
+
+def test_looped_candidate_is_scored_at_every_pass_count_under_a_flops_budget():
+    rep = run_tournament(_cands("ratio_3to1", "loop_second_pass"), steps=4, batch=2, eval_batches=1, budget="flops",
+                         reference="ratio_3to1")
+    by = {r.name: r for r in rep.results}
+    assert set(by["loop_second_pass"].loop_eval) == {1, 2} and not by["ratio_3to1"].loop_eval
+    assert by["loop_second_pass"].steps < 4  # the expected extra pass costs compute
+    assert "Eval loss by loop pass count" in rep.to_markdown()

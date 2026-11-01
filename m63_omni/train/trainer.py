@@ -9,6 +9,7 @@ resume reproduces the uninterrupted run exactly on CPU.
 from __future__ import annotations
 
 import contextlib
+import random
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -126,9 +127,19 @@ class Trainer:
         dev = next(self.model.parameters()).device.type
         return torch.autocast(device_type=dev, dtype=torch.bfloat16)
 
+    def loop_passes(self, step: int) -> int:
+        """Pass count for ``step``: drawn from ``loop.train_pass_probabilities`` by a step-seeded RNG,
+        so a resumed run repeats the same sequence of pass counts."""
+        lp = self.cfg.loop
+        if not lp.enabled:
+            return 1
+        rng = random.Random(self.cfg.training.seed * 1_000_003 + step)
+        return rng.choices(range(1, lp.max_passes + 1), weights=lp.train_pass_probabilities)[0]
+
     def train_step(self) -> dict:
         self.model.train()
         batch = as_batch(self.batch_fn(self.state.cursor))
+        passes = self.loop_passes(self.state.step)
         lr = wsd_lr(self.state.positions, self.total_positions, self.cfg.training)
         for group in self.opt.param_groups:
             group["lr"] = lr
@@ -136,11 +147,11 @@ class Trainer:
         use_mtp = self.cfg.mtp.enabled
         with self._ctx():
             if self.segmented_memory:
-                out = self.model.forward_segmented(batch.input_ids, batch.labels, compute_mtp=use_mtp)
+                out = self.model.forward_segmented(batch.input_ids, batch.labels, compute_mtp=use_mtp, loop_passes=passes)
             else:
                 out = self.model(batch.input_ids, labels=batch.labels, segment_ids=batch.segment_ids,
                                  position_ids=batch.position_ids, reset_mask=batch.reset_mask,
-                                 modality_ids=batch.modality_ids, compute_mtp=use_mtp)
+                                 modality_ids=batch.modality_ids, compute_mtp=use_mtp, loop_passes=passes)
             losses = compute_loss(self.cfg, out)
         self.opt.zero_grad(set_to_none=True)
         losses.total.backward()
@@ -154,6 +165,7 @@ class Trainer:
         self.state.positions += n_pos
         self.state.cursor += 1
         metrics = {"step": self.state.step, "positions": self.state.positions, "lr": lr, "grad_norm": grad_norm,
+                   "loop_passes": passes,
                    "tokens_per_s": n_pos / max(time.perf_counter() - t0, 1e-9), **losses.terms,
                    **RouterMonitor.load_summary(out.router_stats)}
         metrics["loss_spike"] = self.spikes.update(self.state.step, losses.terms["lm"])

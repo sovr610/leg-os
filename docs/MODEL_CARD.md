@@ -1,6 +1,6 @@
 # Model card config — m63_omni
 
-Config fingerprint: `sha256:76a9fd259ef827084d9c49cb491c5db97503ae36211681040fd8d883591e0fdc`  
+Config fingerprint: `sha256:f8c0674effda7ef7df8bf3aff9b75aa5408b4b351c442a56009e99c70d06e21e`  
 Generated from code; do not edit by hand. Values are derived from configuration, not measured.
 
 ## Parameters (code-generated manifest)

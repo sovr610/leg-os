@@ -29,6 +29,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
+import numpy as np
 import torch
 
 from ..config import GATED_GQA, M63Config, _deep_merge, _read, from_dict
@@ -71,6 +72,7 @@ class CandidateResult:
     systems_pass: bool = True
     gate_failures: list[str] = field(default_factory=list)
     pareto: bool = False
+    loop_eval: dict = field(default_factory=dict)  # eval loss at each loop pass count (looped candidates)
 
 
 @dataclass
@@ -109,6 +111,11 @@ class TournamentReport:
         if self.skipped:
             lines += ["", "Skipped (not distinguishable by this runner):"]
             lines += [f"- {name}: {why}" for name, why in sorted(self.skipped.items())]
+        looped = [r for r in self.results if r.loop_eval]
+        if looped:
+            lines += ["", "Eval loss by loop pass count (the table uses the default count):"]
+            lines += [f"- {r.name}: " + ", ".join(f"{p} pass(es) {v:.4f}" for p, v in sorted(r.loop_eval.items()))
+                      for r in looped]
         if self.notes:
             lines += ["", "Not exercised by this run:"]
             lines += [f"- {name}: {'; '.join(n)}" for name, n in sorted(self.notes.items())]
@@ -134,11 +141,25 @@ def fit_anchors(cfg_dict: dict) -> dict:
     return cfg_dict
 
 
+def fit_loop(cfg_dict: dict) -> dict:
+    """Keep a variant's loop range if it fits the base; else loop the middle half of the hybrid groups."""
+    lp, m = cfg_dict.get("loop", {}), cfg_dict["model"]
+    if not lp.get("enabled"):
+        return cfg_dict
+    P, L = len(m["hybrid_pattern"]), m["layers"]
+    first, last = lp.get("first_layer", 1), lp.get("last_layer", L)
+    if not (1 <= first <= last <= L and (first - 1) % P == 0 and last % P == 0):
+        groups = L // P
+        g0, n = groups // 4, max(1, groups // 2)
+        lp["first_layer"], lp["last_layer"] = g0 * P + 1, (g0 + n) * P
+    return cfg_dict
+
+
 def build_candidates(base: M63Config, variants: Sequence[str | Path]) -> list[Candidate]:
     out = []
     for v in variants:
         ov = variant_overrides(v)
-        merged = fit_anchors(_deep_merge(base.to_dict(), ov))
+        merged = fit_loop(fit_anchors(_deep_merge(base.to_dict(), ov)))
         out.append(Candidate(Path(v).stem, from_dict(merged), ov))
     return out
 
@@ -229,13 +250,17 @@ def run_tournament(
     if len(vocab) != 1:
         raise ValueError("candidates must share a vocabulary (matched tokenizer)")
     manifests = {c.name: build_manifest(c.cfg) for c in candidates}
+
+    def train_active(c: Candidate) -> float:  # expected active parameters per position, extra loop passes included
+        return manifests[c.name].active_excl_head + (c.cfg.expected_train_passes() - 1) * manifests[c.name].loop_extra_active(c.cfg)
+
     ref = reference or candidates[0].name
-    ref_active = manifests[ref].active_excl_head
+    ref_active = train_active(next(c for c in candidates if c.name == ref))
     results: list[CandidateResult] = []
     for c in candidates:
         man = manifests[c.name]
         S = seq_len or c.cfg.training.seq_len
-        n_steps = steps if budget == "positions" else max(1, round(steps * ref_active / man.active_excl_head))
+        n_steps = steps if budget == "positions" else max(1, round(steps * ref_active / train_active(c)))
         torch.manual_seed(seed)
         cfg = c.cfg.replace(multimodal={"enabled": False})
         model = M63Omni(cfg)
@@ -245,16 +270,23 @@ def run_tournament(
         hist = trainer.fit(n_steps)
         train_s = time.perf_counter() - t0
         model.eval()
-        losses = []
-        with torch.no_grad():
-            for j in range(eval_batches):
-                b = as_batch(batch_fn(cfg, 10**7 + j, batch, S, seed + 1))
-                if segmented_memory:
-                    out = model.forward_segmented(b.input_ids, b.labels)
-                else:
-                    out = model(b.input_ids, labels=b.labels, segment_ids=b.segment_ids, position_ids=b.position_ids,
-                                reset_mask=b.reset_mask)
-                losses.append(float(out.lm_loss))
+        def eval_losses(passes: Optional[int] = None) -> list[float]:
+            out_losses = []
+            with torch.no_grad():
+                for j in range(eval_batches):
+                    b = as_batch(batch_fn(cfg, 10**7 + j, batch, S, seed + 1))
+                    if segmented_memory:
+                        out = model.forward_segmented(b.input_ids, b.labels, loop_passes=passes)
+                    else:
+                        out = model(b.input_ids, labels=b.labels, segment_ids=b.segment_ids, position_ids=b.position_ids,
+                                    reset_mask=b.reset_mask, loop_passes=passes)
+                    out_losses.append(float(out.lm_loss))
+            return out_losses
+
+        losses = eval_losses()
+        loop_eval = {}
+        if cfg.loop.enabled:
+            loop_eval = {p: float(np.mean(eval_losses(p))) for p in range(1, cfg.loop.max_passes + 1)}
         mean, lo, hi = bootstrap_ci(losses, seed=seed)
         effs = [measure(model, prompt_tokens=min(64, max(cfg.model.context_targets) - 16), new_tokens=8, seed=seed)
                 for _ in range(max(1, timing_repeats))]
@@ -262,11 +294,11 @@ def run_tournament(
         alarms = sorted({a for h in hist for a in h["alarms"]})
         r = CandidateResult(
             name=c.name, overrides=c.overrides, resident_params=man.total, active_params=man.active_excl_head,
-            steps=n_steps, positions=trainer.state.positions, train_flops=6.0 * man.active_excl_head * trainer.state.positions,
+            steps=n_steps, positions=trainer.state.positions, train_flops=6.0 * train_active(c) * trainer.state.positions,
             first_loss=hist[0]["lm"], final_loss=hist[-1]["lm"], eval_loss=mean, eval_ci=(lo, hi),
             train_tokens_per_s=trainer.state.positions / max(train_s, 1e-9), prefill_tok_s=eff.prefill_tok_s,
             tpot_ms=eff.tpot_ms, kv_bytes_per_token=eff.kv_bytes_per_token_measured, recurrent_bytes=eff.recurrent_bytes,
-            router_max_over_mean=hist[-1]["max_over_mean"], alarms=alarms,
+            router_max_over_mean=hist[-1]["max_over_mean"], alarms=alarms, loop_eval=loop_eval,
         )
         if not math.isfinite(r.eval_loss):
             r.gate_failures.append("non-finite eval loss")

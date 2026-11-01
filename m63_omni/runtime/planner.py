@@ -49,6 +49,7 @@ class PlannerConfig:
     max_string_tokens: int = 24
     max_array_items: int = 4
     max_context_tokens_per_item: int = 512
+    think_harder_on_repair: bool = False  # run the looped block max_passes times once a repair is needed
 
 
 class ModelPlanner:
@@ -97,6 +98,8 @@ class ModelPlanner:
     def __call__(self, bundle: ContextBundle) -> dict[str, Any]:
         if bundle.branch_id != self.session.branch_id:
             self.session.attach_branch(bundle.branch_id)
+        if self.cfg.think_harder_on_repair and bundle.mode == "repair" and self.session.model.cfg.loop.enabled:
+            self.session.think_harder()  # cheaper than escalating to the flagship; logged and replayable
         self._ingest_context(bundle)
         env = self.decode(bundle)
         self.envelopes.append(env)

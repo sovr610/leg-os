@@ -57,10 +57,11 @@ class HybridCache:
     next_rope: Optional[torch.Tensor] = None  # [B] next RoPE position (restarts per document)
     mtp: Optional["HybridCache"] = None  # MTP module's own attention cache
     meta: dict = field(default_factory=dict)
+    loop_passes: int = 1  # passes over the looped block; one state slot per layer execution
 
     @classmethod
-    def empty(cls, num_layers: int) -> "HybridCache":
-        return cls(layers=[None] * num_layers)
+    def empty(cls, num_slots: int, loop_passes: int = 1) -> "HybridCache":
+        return cls(layers=[None] * num_slots, loop_passes=loop_passes)
 
     def clone(self) -> "HybridCache":
         return HybridCache(
@@ -70,6 +71,7 @@ class HybridCache:
             next_rope=None if self.next_rope is None else self.next_rope.clone(),
             mtp=None if self.mtp is None else self.mtp.clone(),
             meta=dict(self.meta),
+            loop_passes=self.loop_passes,
         )
 
     def detach_(self) -> "HybridCache":

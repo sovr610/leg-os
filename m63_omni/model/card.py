@@ -47,7 +47,24 @@ def model_card(cfg: M63Config, manifest: ParameterManifest | None = None) -> dic
         "training_compute": cap.training_compute(cfg, manifest=m).to_dict(),
         "mtp": {"depth": cfg.mtp.layers if cfg.mtp.enabled else 0, "draft_tokens": cfg.mtp.draft_tokens,
                 "share_weights": cfg.mtp.share_weights},
+        "loop": None if not cfg.loop.enabled else {
+            "layers": [cfg.loop.first_layer, cfg.loop.last_layer], "max_passes": cfg.loop.max_passes,
+            "default_passes": cfg.loop.default_passes,
+            "active_per_pass_count": {p: m.active_with_passes(cfg, p, include_head=False)
+                                      for p in range(1, cfg.loop.max_passes + 1)},
+            "kv_bytes_per_token_bf16": {p: cap.kv_bytes_per_token(cfg, loop_passes=p)
+                                        for p in range(1, cfg.loop.max_passes + 1)},
+        },
     }
+
+
+def _loop_lines(loop: dict | None) -> list[str]:
+    if loop is None:
+        return []
+    a, kv = loop["active_per_pass_count"], loop["kv_bytes_per_token_bf16"]
+    return [f"- Second-pass loop: layers {loop['layers'][0]}-{loop['layers'][1]} run up to {loop['max_passes']}x "
+            f"(sessions start at {loop['default_passes']}); "
+            + "; ".join(f"{p} pass(es): {a[p] / 1e9:.2f}B active, {kv[p] / 1024:.0f} KiB KV/token" for p in sorted(a))]
 
 
 def _compute_lines(tc: dict) -> str:
@@ -97,6 +114,7 @@ def model_card_markdown(cfg: M63Config) -> str:
         f"- Neural memory weights + momentum: {c['memory_state_bytes_bf16'] / cap.MiB:.1f} MiB per session",
         "- Raw weights: " + ", ".join(f"{k} {v / 1e9:.2f} GB ({_gib(v)})" for k, v in c["weights_bytes"].items()),
         f"- MTP: depth {c['mtp']['depth']}, drafts up to {c['mtp']['draft_tokens']} token(s) per step",
+        *_loop_lines(c["loop"]),
         "",
         "## Training compute (derived, §8 curriculum)",
         "",

@@ -20,14 +20,14 @@ tool-orchestration control plane.
 
 | Package | Contents |
 |---|---|
-| `m63_omni/model` | GDN, KDA (tournament alternative), and gated-GQA mixers, dropless MoE with bias-balanced sigmoid router and node-limited routing, Titans-style memory anchors, sequential multi-depth MTP, ViT/resampler/temporal/audio encoders, time-aligned AV interleaving (embedding or text timestamps, any window length), the full `M63Omni` model, code-generated parameter manifest and model card |
+| `m63_omni/model` | GDN, KDA (tournament alternative), and gated-GQA mixers, dropless MoE with bias-balanced sigmoid router and node-limited routing, Titans-style memory anchors, sequential multi-depth MTP, an optional second pass over the middle layers ("think harder", off by default), ViT/resampler/temporal/audio encoders, time-aligned AV interleaving (embedding or text timestamps, any window length), the full `M63Omni` model, code-generated parameter manifest and model card |
 | `m63_omni/kernels` | Naive references + optimised forms: chunkwise-parallel GDN and KDA (exact segment-aware resets), attention, sort-based and padded-bmm grouped MoE, closed-form memory gradients |
 | `m63_omni/data` | Byte-level BPE + 256 reserved special IDs, exact/near dedup, decontamination with source-event holdouts, PII/quality filters, provenance ledger and immutable manifests, the ten-stage §8 pipeline, token budgeting and AV chunk planning, Stage A–D mixtures, sequence packing |
 | `m63_omni/train` | Combined objective, WSD schedule and batch ramp, reference trainer, exact checkpoint/resume with rolling + milestone tiers, router/numerics/spike monitors, distributed-layout validation |
 | `m63_omni/runtime` | Authoritative hash-chained event log with branches and verified deletion, sessions (governed memory writes, media ingest via the artifact store, frozen-memory generation, CoW forks, branch adoption, replay, TTL reclaim), schema-guided decoding (class-trie token masks) and the `ModelPlanner` that drives the orchestrator, paged KV with copy-on-write, safety-keyed prefix cache, MTP speculative decoding with full state rollback, capacity and training-compute arithmetic |
 | `m63_omni/agent` | `m63.actions/v1` envelopes, tool registry, deterministic control plane (static validation, permissions, idempotency, sandboxed execution, signed receipts), verifiers, calibrated escalation, orchestration loop |
 | `m63_omni/eval` | Bootstrap CIs and per-cohort reports, scorer self-tests, release gates, IFEval/BFCL scorers and the instruction-following parity gate against a text-only control, long-context probes, efficiency and runtime-security suites |
-| `configs/` | `full.yaml` (the blueprint §11 config), `text_control.yaml` (the parity gate's text-only control), `recommended.yaml` (the researched low-risk defaults: KDA, 4 KV heads, memory off, text timestamps, 2-s AV windows), `long_context`, `serving`, `pilot` (10.6B/2.3B active), `proxy_1b3`, `proxy_300m`, and the proxy-tournament variants (1:1, 3:1, 7:1, full-attention control, KDA, half KV heads, memory-off, memory decay-to-M0, top-1/top-4, no-shared-expert, text timestamps, 2-s AV windows, all recommended defaults) |
+| `configs/` | `full.yaml` (the blueprint §11 config), `text_control.yaml` (the parity gate's text-only control), `recommended.yaml` (the researched low-risk defaults: KDA, 4 KV heads, memory off, text timestamps, 2-s AV windows), `long_context`, `serving`, `pilot` (10.6B/2.3B active), `proxy_1b3`, `proxy_300m`, and the proxy-tournament variants (1:1, 3:1, 7:1, full-attention control, KDA, half KV heads, memory-off, memory decay-to-M0, top-1/top-4, no-shared-expert, text timestamps, 2-s AV windows, all recommended defaults, optional second-pass loop) |
 
 ## Quick start
 
@@ -146,6 +146,9 @@ authorises, executes, signs, and verifies each call.
   tested; sampled speculative decoding passes chi-square distribution tests.
 * `m63 release-check` produces evidence for all six non-negotiable gates; injected tool
   output that a planner *obeys* still executes nothing unauthorised.
+* With the optional loop, prefill + decode equals the full forward at 1 and 2 passes, one pass
+  equals the unlooped model bit for bit, and a session's switch to 2 passes is logged, replayed,
+  and respected by forks; training resumes exactly with sampled pass counts.
 * The instruction-following parity gate passes equivalent models at benchmark scale, fails a
   real regression or one collapsed BFCL category, reports small samples as inconclusive rather
   than passing them, and refuses to run with a broken scorer.

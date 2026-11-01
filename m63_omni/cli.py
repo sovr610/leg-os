@@ -17,8 +17,14 @@ def _cfg(path: str | None):
 def cmd_manifest(a: argparse.Namespace) -> int:
     from .model.manifest import build_manifest
 
-    m = build_manifest(_cfg(a.config))
+    cfg = _cfg(a.config)
+    m = build_manifest(cfg)
     print(json.dumps(m.to_dict(), indent=2) if a.json else m.to_markdown())
+    if cfg.loop.enabled and not a.json:
+        lp = cfg.loop
+        print(f"\nLoop: layers {lp.first_layer}-{lp.last_layer} run up to {lp.max_passes}x (default {lp.default_passes}); "
+              + ", ".join(f"{p} pass(es): {m.active_with_passes(cfg, p, include_head=False) / 1e9:.3f}B active"
+                          for p in range(1, lp.max_passes + 1)))
     return 0
 
 
@@ -47,10 +53,13 @@ def cmd_capacity(a: argparse.Namespace) -> int:
         f = cap.session_footprint(cfg, t)
         print(f"  {t // 1024:>4}K: KV {f.kv / cap.GiB:.2f} GiB + recurrent {f.gdn / cap.MiB:.1f} MiB + memory {f.memory / cap.MiB:.1f} MiB")
     print("per-session serving view (FP8 KV, BF16 state, MTP KV, state checkpoint every 8K tokens, paged):")
+    passes = range(1, (cfg.loop.max_passes if cfg.loop.enabled else 1) + 1)
     for t in (32768, 131072, 262144):
-        f = cap.serving_footprint(cfg, t)
-        print(f"  {t // 1024:>4}K: {f.total / 1e9:.2f} GB (KV {f.kv / 1e9:.2f}, MTP KV {f.mtp_kv / 1e9:.2f}, "
-              f"checkpoints {f.checkpoints / 1e9:.2f}, state+memory {(f.gdn + f.memory) / 1e6:.0f} MB)")
+        for p in passes:
+            f = cap.serving_footprint(cfg, t, loop_passes=p)
+            tag = f" {p}-pass" if cfg.loop.enabled else ""
+            print(f"  {t // 1024:>4}K{tag}: {f.total / 1e9:.2f} GB (KV {f.kv / 1e9:.2f}, MTP KV {f.mtp_kv / 1e9:.2f}, "
+                  f"checkpoints {f.checkpoints / 1e9:.2f}, state+memory {(f.gdn + f.memory) / 1e6:.0f} MB)")
     for d in ("bfloat16", "fp8", "int4"):
         b = cap.weight_bytes(total, d)
         print(f"weights {d:>8}: {b / 1e9:.2f} GB ({b / cap.GiB:.2f} GiB)")

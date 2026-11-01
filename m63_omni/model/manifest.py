@@ -54,6 +54,18 @@ class ParameterManifest:
     active: dict[str, float]  # per text token, excluding the tied head
     head: int
     tensors: dict[str, list[int]] = field(default_factory=dict)
+    layer_active: list[float] = field(default_factory=list)  # active per text token, per backbone layer
+
+    def loop_extra_active(self, cfg: M63Config) -> float:
+        """Active parameters one extra pass over the looped block adds per token (0 without a loop)."""
+        if not cfg.loop.enabled:
+            return 0.0
+        return float(sum(self.layer_active[cfg.loop.first_layer - 1 : cfg.loop.last_layer]))
+
+    def active_with_passes(self, cfg: M63Config, passes: int, include_head: bool = True) -> float:
+        cfg.loop_schedule(passes)  # validates
+        base = self.active_incl_head if include_head else self.active_excl_head
+        return base + (passes - 1) * self.loop_extra_active(cfg)
 
     @property
     def total(self) -> int:
@@ -129,17 +141,21 @@ def build_manifest(cfg: M63Config, model: Optional[torch.nn.Module] = None) -> P
             model = M63Omni(cfg)
     resident = {c: 0 for c in CATEGORIES}
     tensors: dict[str, list[int]] = {}
-    for name, p in model.named_parameters():
-        resident[categorize(name, cfg)] += p.numel()
-        tensors[name] = list(p.shape)
     frac = cfg.moe.top_k / cfg.moe.routed_experts
+    layer_active = [0.0] * cfg.model.layers
+    for name, p in model.named_parameters():
+        cat = categorize(name, cfg)
+        resident[cat] += p.numel()
+        tensors[name] = list(p.shape)
+        if name.startswith("blocks.") and cat != "norms":
+            layer_active[int(name.split(".")[1])] += p.numel() * (frac if cat == "routed_experts" else 1.0)
     active = {c: float(resident[c]) for c in CATEGORIES}
     active["routed_experts"] = resident["routed_experts"] * frac
     active["embedding"] = 0.0  # lookup, not compute; the tied head is reported separately
     active["multimodal"] = 0.0  # input-dependent
     active["mtp"] = 0.0  # zero during ordinary decoding
     head = cfg.model.vocab_size * cfg.model.hidden_size
-    return ParameterManifest(cfg.fingerprint(), resident, active, head, tensors)
+    return ParameterManifest(cfg.fingerprint(), resident, active, head, tensors, layer_active)
 
 
 def analytic_backbone(cfg: M63Config) -> dict[str, int]:

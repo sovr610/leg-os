@@ -26,10 +26,11 @@ class PrefixKey:
     trust_policy: str
     prefix_hash: str  # hash over token IDs + asset hashes + preprocessing + timestamps
     boundary_tokens: int  # checkpointed boundary length
+    loop_passes: int = 1  # a 1-pass prefix state cannot serve a 2-pass request
 
     def digest(self) -> str:
         return content_hash([self.tenant_id, self.model_version, self.tokenizer_version, self.trust_policy,
-                             self.prefix_hash, self.boundary_tokens])
+                             self.prefix_hash, self.boundary_tokens, self.loop_passes])
 
 
 class PrefixCache:
