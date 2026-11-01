@@ -22,7 +22,9 @@ makes no capability claims**.
 | §12 Build program / proxy tournament | `configs/proxy_*.yaml`, `configs/pilot.yaml`, `configs/tournament/*.yaml` | `tests/test_manifest.py::test_pilot_and_proxy_sizes_in_blueprint_ranges` |
 | §13 Evaluation matrix & release gates | `eval/harness.py`, `eval/gates.py`, `eval/long_context.py`, `eval/efficiency.py`, `eval/security.py` | `tests/eval/test_eval.py` |
 | §14 Serving & capacity | `runtime/paged_kv.py`, `runtime/prefix_cache.py`, `runtime/speculative.py`, `runtime/capacity.py` | `tests/runtime/*` |
-| Appendix A pseudocode (ingest / generate / fork) | `runtime/session.py` (`ingest`, `generate`, `fork`, `replay`) | `tests/runtime/test_session.py` |
+| Appendix A pseudocode (ingest / generate / fork) | `runtime/session.py` (`ingest`, `ingest_media`, `generate`, `fork`, `attach_branch`, `replay`) | `tests/runtime/test_session.py`, `tests/runtime/test_media_session.py` |
+| §10 model as planner (valid plans and tool calls) | `runtime/structured.py` (schema-guided decoding), `runtime/planner.py` (`ModelPlanner`, `open_model_session`) | `tests/runtime/test_planner.py` |
+| §13/§16 release gates, end to end | `eval/release.py`, `eval/agent_security.py`, `m63 release-check` | `tests/eval/test_release.py` (incl. negative tests) |
 | Appendix B verification inventory | `tests/` (organised by test family) | — |
 
 ## Appendix B coverage
@@ -61,11 +63,18 @@ makes no capability claims**.
 5. **Recurrent state precision.** The reference keeps GDN state in FP32 (36 MiB/session at
    reference shape); the blueprint's 18 MiB figure assumes 2-byte storage. Both are exposed
    by `runtime.capacity.gdn_state_bytes(dtype_bytes=...)`.
-6. **Token estimates are upper bounds.** `data.media` rounds a partial final AV window up
+6. **Schema-guided decoding.** The model chooses values (message, number of calls, tool,
+   arguments, escalation); runtime code emits all JSON structure and fills what the model
+   must not invent (plan ID, idempotency keys, timeout class, verifiers, budget). Generated
+   strings exclude `"`, `\` and control characters, so no escaping is needed; optional
+   object properties are emitted only when requested; only discriminated `oneOf` unions and
+   nullable strings are supported. Token masks are computed per NFA state set and cached —
+   production would precompile them (Outlines/XGrammar style).
+7. **Token estimates are upper bounds.** `data.media` rounds a partial final AV window up
    when estimating cost, while the audio encoder emits only complete tokens, so a plan can
    exceed the encoded count by at most one audio token per asset — the safe direction for
    the §5 "estimate before encoding, never truncate silently" rule.
-7. **Speculative rollback.** Rejected MTP drafts restore the pre-verification snapshot and
+8. **Speculative rollback.** Rejected MTP drafts restore the pre-verification snapshot and
    replay the accepted tokens — exact by construction; production kernels may checkpoint
    per token instead, but must match this reference.
 

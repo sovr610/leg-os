@@ -96,6 +96,15 @@ def cmd_security(a: argparse.Namespace) -> int:
     return 0 if rep.passed else 1
 
 
+def cmd_release(a: argparse.Namespace) -> int:
+    from .eval.release import run_release_check, write_report
+
+    rep = run_release_check(_cfg(a.config) if a.config else None)
+    write_report(rep, a.json, a.md)
+    print(rep.to_markdown())
+    return 0 if rep.passed else 1
+
+
 def cmd_validate(a: argparse.Namespace) -> int:
     from .config import load_config
 
@@ -139,6 +148,11 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("security", help="runtime security suite")
     s.add_argument("--config")
     s.set_defaults(fn=cmd_security)
+    s = sub.add_parser("release-check", help="evidence for every non-negotiable release gate (exit 1 on failure)")
+    s.add_argument("--config", help="CPU-sized config to check (default: tiny)")
+    s.add_argument("--json", help="write the JSON report here")
+    s.add_argument("--md", help="write the markdown report here")
+    s.set_defaults(fn=cmd_release)
     s = sub.add_parser("validate-configs", help="strictly validate every YAML config")
     s.add_argument("--dir", default="configs")
     s.set_defaults(fn=cmd_validate)

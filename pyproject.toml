@@ -7,7 +7,7 @@ name = "m63-omni"
 version = "0.1.0"
 description = "M63-Omni: reference implementation of a mid-tier hybrid (GDN/GQA) sparse-MoE native-multimodal orchestrator"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "torch>=2.3",
     "numpy>=1.24",
@@ -15,13 +15,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
 m63 = "m63_omni.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["m63_omni*"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["F", "E9"]  # pyflakes + syntax errors; style is not enforced
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -16,7 +16,6 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from ..common import Modality
 from ..config import MoEConfig

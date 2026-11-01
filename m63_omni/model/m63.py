@@ -26,7 +26,7 @@ import torch.nn.functional as F
 
 from ..config import GATED_GQA, GDN, M63Config
 from .attention import GatedGQA
-from .cache import GDNLayerState, HybridCache, KVLayerState, StreamIndex, resolve_stream
+from .cache import HybridCache, StreamIndex, resolve_stream
 from .encoders import MultimodalFrontEnd
 from .gdn import GatedDeltaNet
 from .layers import RMSNorm

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from .common import canonical_json, content_hash
+from .common import content_hash
 
 GDN = "gdn"
 GATED_GQA = "gated_gqa"

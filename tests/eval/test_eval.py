@@ -1,7 +1,6 @@
 """Evaluation harness, release gates, security suite, long-context probes (§13, Appendix B)."""
 
 import pytest
-import torch
 
 from m63_omni.eval.efficiency import measure
 from m63_omni.eval.gates import NON_NEGOTIABLE, MemoryPromotionGate, evaluate_release

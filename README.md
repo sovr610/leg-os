@@ -24,7 +24,7 @@ tool-orchestration control plane.
 | `m63_omni/kernels` | Naive references + optimised forms: chunkwise-parallel GDN (exact segment-aware resets), attention, sort-based and padded-bmm grouped MoE, closed-form memory gradients |
 | `m63_omni/data` | Byte-level BPE + 256 reserved special IDs, exact/near dedup, decontamination with source-event holdouts, PII/quality filters, provenance ledger and immutable manifests, the ten-stage §8 pipeline, token budgeting and AV chunk planning, Stage A–D mixtures, sequence packing |
 | `m63_omni/train` | Combined objective, WSD schedule and batch ramp, reference trainer, exact checkpoint/resume with rolling + milestone tiers, router/numerics/spike monitors, distributed-layout validation |
-| `m63_omni/runtime` | Authoritative hash-chained event log with branches and verified deletion, sessions (governed memory writes, frozen-memory generation, CoW forks, replay, TTL reclaim), paged KV with copy-on-write, safety-keyed prefix cache, MTP speculative decoding with full state rollback, capacity arithmetic |
+| `m63_omni/runtime` | Authoritative hash-chained event log with branches and verified deletion, sessions (governed memory writes, media ingest via the artifact store, frozen-memory generation, CoW forks, branch adoption, replay, TTL reclaim), schema-guided decoding and the `ModelPlanner` that drives the orchestrator, paged KV with copy-on-write, safety-keyed prefix cache, MTP speculative decoding with full state rollback, capacity arithmetic |
 | `m63_omni/agent` | `m63.actions/v1` envelopes, tool registry, deterministic control plane (static validation, permissions, idempotency, sandboxed execution, signed receipts), verifiers, calibrated escalation, orchestration loop |
 | `m63_omni/eval` | Bootstrap CIs and per-cohort reports, scorer self-tests, release gates, long-context probes, efficiency and runtime-security suites |
 | `configs/` | `full.yaml` (the blueprint §11 config), `long_context`, `serving`, `pilot` (10.6B/2.3B active), `proxy_1b3`, `proxy_300m`, and the proxy-tournament variants (1:1, 3:1, 7:1, full-attention control, memory-off, top-1/top-4, no-shared-expert) |
@@ -52,7 +52,7 @@ m63 train --steps 100
 ```
 
 ```bash
-m63 security
+m63 release-check
 ```
 
 `m63 manifest` instantiates the full model on PyTorch's `meta` device and counts every
@@ -91,6 +91,24 @@ session.delete()                                                     # removes K
 assert session.verify_deleted()
 ```
 
+## Driving the control plane with the model
+
+```python
+from m63_omni.agent import ControlPlane, Orchestrator, Principal, ToolRegistry, apply_edit_tool
+from m63_omni.runtime.planner import ModelPlanner, open_model_session
+
+registry = ToolRegistry()
+registry.register(apply_edit_tool())
+cp = ControlPlane(registry, secret=b"replace-with-a-real-secret-0123456789")
+editor = Principal("editor", "acme", frozenset({"timeline:write"}))
+control_session, model_session = open_model_session(cp, editor, "edit-42", model)  # one shared event log
+result = Orchestrator(cp, ModelPlanner(model_session, tokenizer)).run(control_session, "Trim c_17 and add a dissolve")
+```
+
+Every envelope the model produces parses as `m63.actions/v1` and every argument object
+validates against its tool's schema by construction; the control plane still validates,
+authorises, executes, signs, and verifies each call.
+
 ## Verified invariants (selected)
 
 * Chunked GDN prefill equals the recurrent decode path (outputs, states, gradients) across
@@ -102,7 +120,12 @@ assert session.verify_deleted()
   every recurrent, attention, and memory state.
 * Checkpoint resume reproduces the uninterrupted run exactly on CPU.
 * Untrusted content and generation never write persistent memory; cross-tenant reads fail;
-  deletion is verifiable; memory snapshots are invalidated by model/tokenizer upgrades.
+  deletion is verifiable (including media blobs); memory snapshots are invalidated by
+  model/tokenizer upgrades.
+* `m63 release-check` produces evidence for all six non-negotiable gates; injected tool
+  output that a planner *obeys* still executes nothing unauthorised.
+* CI (`.github/workflows/ci.yml`) runs lint, config validation, the test suite, the
+  model-card freshness check, and the release check on Python 3.11–3.13.
 
 ## Repository layout
 

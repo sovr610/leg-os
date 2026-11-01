@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from m63_omni.config import reference, tiny
+from m63_omni.config import reference
 from m63_omni.model.m63 import M63Omni
 from m63_omni.model.moe import RouterStats
 from m63_omni.train.checkpoint import CheckpointManager, CheckpointMismatchError, load_checkpoint

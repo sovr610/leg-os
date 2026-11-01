@@ -135,3 +135,13 @@ def test_memory_off_session(model, cfg):
     s.ingest(_toks(cfg, 2 * cfg.memory.update_segment_tokens, 0))
     assert s.memory is None and len(s.generate(3)) == 3
     assert not any(e.kind == "memory_snapshot" for e in s.log.replay())
+
+
+def test_session_uses_a_provided_empty_log(model, tmp_path):
+    from m63_omni.runtime.event_log import EventLog
+
+    log = EventLog("t", "s", path=tmp_path / "log.jsonl")
+    assert len(log) == 0  # an empty log is falsy; the session must still adopt it
+    s = Session(model, "t", "s", event_log=log)
+    s.ingest([1, 2, 3])
+    assert s.log is log and (tmp_path / "log.jsonl").exists()
