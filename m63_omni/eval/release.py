@@ -68,6 +68,7 @@ class ReleaseReport:
             "gates": self.gate_results(),
             "checks": {g: [c.__dict__ for c in cs] for g, cs in self.checks.items()},
             "failures": [] if self.gates is None else self.gates.failures,
+            "instruction_parity": None if self.gates is None else self.gates.parity,
         }
 
     def to_markdown(self) -> str:
@@ -79,6 +80,8 @@ class ReleaseReport:
             lines.append(f"## {'✅' if ok else '❌'} {g}")
             lines += [f"- {'pass' if c.passed else 'FAIL'}: {c.name}" + (f" — {c.detail}" if c.detail else "") for c in cs] or ["- no evidence"]
             lines.append("")
+        if self.gates is not None:
+            lines += ["## Product gates", "", self.gates.to_markdown(), ""]
         return "\n".join(lines)
 
 
@@ -155,7 +158,8 @@ def check_deletion(model: M63Omni) -> list[Check]:
     return out
 
 
-def run_release_check(cfg: Optional[M63Config] = None) -> ReleaseReport:
+def run_release_check(cfg: Optional[M63Config] = None, parity=None) -> ReleaseReport:
+    """``parity``: an optional :class:`~m63_omni.eval.parity.ParityReport` from trained checkpoints."""
     cfg = cfg or tiny()
     rep = ReleaseReport(cfg.fingerprint())
     torch.manual_seed(0)
@@ -179,7 +183,7 @@ def run_release_check(cfg: Optional[M63Config] = None) -> ReleaseReport:
         Check(f"runtime: {n}", by[n].passed) for n in ("memory_untrusted_write_blocked", "memory_frozen_during_generation",
                                                         "memory_snapshot_upgrade_invalidated") if n in by
     ]
-    rep.gates = evaluate_release(rep.gate_results())
+    rep.gates = evaluate_release(rep.gate_results(), parity=parity)
     return rep
 
 

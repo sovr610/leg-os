@@ -1,0 +1,8 @@
+# Text-only control for the instruction-following parity gate (`m63 parity`; docs/IMPROVEMENTS.md §1, §4).
+# The candidate's configuration with the multimodal front end disabled. Train it on the candidate's own
+# text/code stream with media batches removed (data.mixture.text_control_budget: 3.19T positions under the
+# default curriculum). Point `extends` at the candidate's config: full.yaml here, recommended.yaml if that
+# is the candidate.
+extends: full.yaml
+multimodal:
+  enabled: false

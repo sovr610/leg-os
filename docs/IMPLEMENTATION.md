@@ -22,6 +22,7 @@ makes no capability claims**.
 | §11 Distributed layout, repository layout | `train/parallel.py`, `configs/*` | `tests/train/test_training.py::test_parallel_layouts`, `tests/test_config.py` |
 | §12 Build program / proxy tournament | `configs/proxy_*.yaml`, `configs/pilot.yaml`, `configs/tournament/*.yaml`, `configs/recommended.yaml` | `tests/test_manifest.py::test_pilot_and_proxy_sizes_in_blueprint_ranges` |
 | §13 Evaluation matrix & release gates | `eval/harness.py`, `eval/gates.py`, `eval/long_context.py`, `eval/efficiency.py`, `eval/security.py` | `tests/eval/test_eval.py` |
+| Instruction-following parity gate (IFEval / BFCL vs text-only control) | `eval/ifeval.py`, `eval/bfcl.py`, `eval/parity.py`, `m63 parity`, `configs/text_control.yaml`, `data.mixture.text_control_budget` | `tests/eval/test_parity.py` |
 | §14 Serving & capacity | `runtime/paged_kv.py`, `runtime/prefix_cache.py`, `runtime/speculative.py`, `runtime/capacity.py` | `tests/runtime/*` |
 | Appendix A pseudocode (ingest / generate / fork) | `runtime/session.py` (`ingest`, `ingest_media`, `generate`, `fork`, `attach_branch`, `replay`) | `tests/runtime/test_session.py`, `tests/runtime/test_media_session.py` |
 | §10 model as planner (valid plans and tool calls) | `runtime/structured.py` (schema-guided decoding), `runtime/planner.py` (`ModelPlanner`, `open_model_session`) | `tests/runtime/test_planner.py` |
@@ -119,6 +120,18 @@ makes no capability claims**.
     then 70 / 12 / 5 / 8 / 5 (73% text over the stage). Stages B–D are unchanged and the blueprint
     table remains available as `BLUEPRINT_STAGES`. The warm-up length is a starting point for the
     proxy ablation, not a measured value.
+17. **Instruction-following parity gate.** The multimodal candidate is compared with a text-only
+    control (its own config with `multimodal.enabled: false`, trained on its own text/code stream:
+    3.19T positions under the default curriculum) on the same IFEval prompts and BFCL items. Each
+    metric is a paired one-sided 95% non-inferiority test with a 2-point margin: `pass` when the
+    lower bound clears `-2`, `fail` when the point estimate is below it, otherwise `inconclusive`
+    (more prompts or sampled responses needed); any BFCL category dropping more than 5 points
+    fails. Only `pass` passes, and `m63 release-check --parity-report` blocks on anything else.
+    The scorers re-implement IFEval (24 of 25 instruction types; `language:response_language`
+    needs a detector and is skipped in both arms) and BFCL's AST checker (simple, multiple,
+    parallel, parallel-multiple, irrelevance); scorer bias cancels in the paired comparison,
+    but absolute numbers should come from the official evaluators. The margins are proposals
+    to confirm at the pilot.
 
 ## Design review
 
@@ -142,4 +155,6 @@ and split into proxy-tournament variants; `configs/full.yaml` remains the bluepr
 * Process/container sandboxing for tools. The reference control plane enforces timeouts on
   a worker thread with a cooperative cancel flag; a tool that ignores the flag cannot be
   killed this way, so production needs process or container isolation.
+* Producing IFEval/BFCL responses from checkpoints: `m63 parity` consumes official-format
+  response files from whatever serving stack generates them.
 * Real data acquisition, rights review, annotation, and every training run (steps 5–16).

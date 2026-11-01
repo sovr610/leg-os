@@ -3,7 +3,9 @@
 Non-negotiable correctness/security gates block release unconditionally.
 Product gates are tunable thresholds proposed by the blueprint for this project
 (not external benchmark facts) and finalised after the pilot establishes a
-credible baseline.
+credible baseline. The instruction-following parity gate
+(:mod:`~m63_omni.eval.parity`) needs trained checkpoints; when its evidence is
+supplied, anything but ``pass`` blocks the multimodal release.
 """
 
 from __future__ import annotations
@@ -48,6 +50,7 @@ class GateReport:
     passed: bool
     failures: list[str] = field(default_factory=list)
     memory_promoted: Optional[bool] = None
+    parity: Optional[str] = None  # instruction-following parity verdict, None when not evaluated
 
     def to_markdown(self) -> str:
         head = "PASS" if self.passed else "BLOCKED"
@@ -55,18 +58,27 @@ class GateReport:
         lines += [f"- {f}" for f in self.failures]
         if self.memory_promoted is not None:
             lines.append(f"- neural memory {'promoted' if self.memory_promoted else 'ships disabled (memory-off core)'}")
+        lines.append("- instruction-following parity vs text-only control: "
+                     + ("not evaluated (needs trained checkpoints)" if self.parity is None else self.parity))
         return "\n".join(lines)
 
 
 def evaluate_release(results: dict[str, bool], memory_metrics: Optional[dict] = None,
-                     memory_gate: MemoryPromotionGate = MemoryPromotionGate()) -> GateReport:
+                     memory_gate: MemoryPromotionGate = MemoryPromotionGate(), parity=None) -> GateReport:
     """``results`` maps every non-negotiable gate name to True (passed) / False.
 
     A missing gate counts as a failure. Memory failing its product gate does not
-    block release: the memory-off core ships instead (§12, §15).
+    block release: the memory-off core ships instead (§12, §15). ``parity`` is a
+    :class:`~m63_omni.eval.parity.ParityReport`; a ``fail`` or ``inconclusive``
+    verdict blocks release, because instruction following is the core skill.
     """
     failures = [f"non-negotiable gate failed or missing: {g}" for g in NON_NEGOTIABLE if not results.get(g, False)]
     promoted = None
     if memory_metrics is not None:
         promoted = not memory_gate.evaluate(**memory_metrics)
-    return GateReport(not failures, failures, promoted)
+    verdict = None
+    if parity is not None:
+        verdict = parity.verdict
+        if verdict != "pass":
+            failures.append(f"instruction-following parity vs text-only control: {verdict}")
+    return GateReport(not failures, failures, promoted, verdict)

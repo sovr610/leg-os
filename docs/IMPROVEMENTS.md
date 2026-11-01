@@ -65,7 +65,7 @@
    - Instruction following regressed after omni training: IFEval −3.7 to −7.2 points, COLLIE
      −11.4 [GH].
    - Instruction following is the orchestrator's core skill. Add an IFEval / BFCL parity gate
-     against a text-only control.
+     against a text-only control (now `m63 parity`, §9).
 7. **Use interleaved text timestamps.** The 36 recurrent layers never see RoPE or time embeddings.
    Qwen3-VL moved from time-RoPE to text timestamps [GH].
 8. **Make the neural memory a research track, off by default.**
@@ -345,7 +345,8 @@ blueprint baseline. See the table at the end of this section.
 | 4. Node limit | `Router.node_limited` skips the restriction when `top_k ≤ max_nodes_per_token`, where it can never bind. |
 | 8. Chunk length | `multimodal.av_chunk_ms` (2000 in `recommended.yaml`) with `audio_attention: causal` and end-time audio assignment; `multimodal.timestamp_mode: text`. |
 | 9. Structured masks | Class trie + lazy DFA + pruning for regex masks; digit-only integer masks; brute-force equivalence tests. The O(L) KV append remains (reference only). |
-| Stage A mix (§4) | `data.mixture.STAGES`: 0.35T-position text-only warm-up, then 70 / 12 / 5 / 8 / 5; the blueprint table stays as `BLUEPRINT_STAGES`. The IFEval/BFCL parity gate is not built yet. |
+| Stage A mix (§4) | `data.mixture.STAGES`: 0.35T-position text-only warm-up, then 70 / 12 / 5 / 8 / 5; the blueprint table stays as `BLUEPRINT_STAGES`. |
+| Parity gate (§1 item 6) | `eval/parity.py` + `m63 parity`: IFEval prompt- and instruction-level strict and BFCL (mean of categories) vs a text-only control (`configs/text_control.yaml`, trained on `data.mixture.text_control_budget`); paired one-sided non-inferiority with a 2-point margin, `inconclusive` when the data cannot decide, and a 5-point floor per BFCL category. `m63 release-check --parity-report` blocks release on anything but `pass`. Scorers are re-implementations (`eval/ifeval.py`, `eval/bfcl.py`) with self-tests. |
 | §1 defaults | `kda` mixer kind (`kernels/kda.py`, `model/kda.py`); `configs/recommended.yaml`; tournament variants `kda`, `kv_heads_half`, `memory_off`, `text_timestamps`, `av_chunk_2s`, `recommended_defaults`. The text-only tournament reports multimodal-only variants as skipped rather than ranking ties. |
 
 ---

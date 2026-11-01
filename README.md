@@ -26,8 +26,8 @@ tool-orchestration control plane.
 | `m63_omni/train` | Combined objective, WSD schedule and batch ramp, reference trainer, exact checkpoint/resume with rolling + milestone tiers, router/numerics/spike monitors, distributed-layout validation |
 | `m63_omni/runtime` | Authoritative hash-chained event log with branches and verified deletion, sessions (governed memory writes, media ingest via the artifact store, frozen-memory generation, CoW forks, branch adoption, replay, TTL reclaim), schema-guided decoding (class-trie token masks) and the `ModelPlanner` that drives the orchestrator, paged KV with copy-on-write, safety-keyed prefix cache, MTP speculative decoding with full state rollback, capacity and training-compute arithmetic |
 | `m63_omni/agent` | `m63.actions/v1` envelopes, tool registry, deterministic control plane (static validation, permissions, idempotency, sandboxed execution, signed receipts), verifiers, calibrated escalation, orchestration loop |
-| `m63_omni/eval` | Bootstrap CIs and per-cohort reports, scorer self-tests, release gates, long-context probes, efficiency and runtime-security suites |
-| `configs/` | `full.yaml` (the blueprint §11 config), `recommended.yaml` (the researched low-risk defaults: KDA, 4 KV heads, memory off, text timestamps, 2-s AV windows), `long_context`, `serving`, `pilot` (10.6B/2.3B active), `proxy_1b3`, `proxy_300m`, and the proxy-tournament variants (1:1, 3:1, 7:1, full-attention control, KDA, half KV heads, memory-off, memory decay-to-M0, top-1/top-4, no-shared-expert, text timestamps, 2-s AV windows, all recommended defaults) |
+| `m63_omni/eval` | Bootstrap CIs and per-cohort reports, scorer self-tests, release gates, IFEval/BFCL scorers and the instruction-following parity gate against a text-only control, long-context probes, efficiency and runtime-security suites |
+| `configs/` | `full.yaml` (the blueprint §11 config), `text_control.yaml` (the parity gate's text-only control), `recommended.yaml` (the researched low-risk defaults: KDA, 4 KV heads, memory off, text timestamps, 2-s AV windows), `long_context`, `serving`, `pilot` (10.6B/2.3B active), `proxy_1b3`, `proxy_300m`, and the proxy-tournament variants (1:1, 3:1, 7:1, full-attention control, KDA, half KV heads, memory-off, memory decay-to-M0, top-1/top-4, no-shared-expert, text timestamps, 2-s AV windows, all recommended defaults) |
 
 ## Quick start
 
@@ -61,6 +61,10 @@ m63 release-check
 
 ```bash
 m63 tournament --steps 20
+```
+
+```bash
+m63 parity --ifeval-data input_data.jsonl --ifeval-candidate omni.jsonl --ifeval-control text.jsonl --bfcl-questions BFCL_v3_simple.json --bfcl-answers possible_answer/BFCL_v3_simple.json --bfcl-candidate omni_bfcl.jsonl --bfcl-control text_bfcl.jsonl
 ```
 
 `m63 manifest` instantiates the full model on PyTorch's `meta` device and counts every
@@ -142,6 +146,9 @@ authorises, executes, signs, and verifies each call.
   tested; sampled speculative decoding passes chi-square distribution tests.
 * `m63 release-check` produces evidence for all six non-negotiable gates; injected tool
   output that a planner *obeys* still executes nothing unauthorised.
+* The instruction-following parity gate passes equivalent models at benchmark scale, fails a
+  real regression or one collapsed BFCL category, reports small samples as inconclusive rather
+  than passing them, and refuses to run with a broken scorer.
 * CI (`.github/workflows/ci.yml`) runs lint, config validation, the test suite, the
   model-card freshness check, and the release check on Python 3.11–3.13; a nightly job runs
   the slow tests and a tournament smoke run.

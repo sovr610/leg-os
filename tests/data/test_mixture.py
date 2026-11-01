@@ -117,3 +117,11 @@ def test_stage_lookup_and_budgets():
     budget = stage_position_budget("A")
     assert budget["text_code"] == 2_555_000_000_000 and sum(budget.values()) == STAGES[0].positions
     assert stage_position_budget(BLUEPRINT_STAGES[0])["text_code"] == 2_100_000_000_000
+
+
+def test_text_control_budget_matches_the_candidate_text_stream():
+    from m63_omni.data.mixture import text_control_budget
+
+    b = text_control_budget()
+    assert b == {"A": 2_555_000_000_000, "B": 375_000_000_000, "C": 192_500_000_000, "D": 67_500_000_000}
+    assert sum(b.values()) == 3_190_000_000_000

@@ -111,10 +111,30 @@ def cmd_security(a: argparse.Namespace) -> int:
 def cmd_release(a: argparse.Namespace) -> int:
     from .eval.release import run_release_check, write_report
 
-    rep = run_release_check(_cfg(a.config) if a.config else None)
+    parity = None
+    if a.parity_report:
+        from .eval.parity import load_report
+
+        parity = load_report(a.parity_report)
+    rep = run_release_check(_cfg(a.config) if a.config else None, parity=parity)
     write_report(rep, a.json, a.md)
     print(rep.to_markdown())
     return 0 if rep.passed else 1
+
+
+def cmd_parity(a: argparse.Namespace) -> int:
+    from .eval.parity import ParityMargins, run_parity, write_report
+
+    if len(a.bfcl_answers) not in (0, len(a.bfcl_questions)):
+        raise SystemExit("--bfcl-answers must be omitted or match --bfcl-questions one to one (use 'none' for irrelevance)")
+    answers = [None if x.lower() == "none" else x for x in a.bfcl_answers] or [None] * len(a.bfcl_questions)
+    margins = ParityMargins(ifeval_prompt_strict=a.margin, ifeval_instruction_strict=a.margin, bfcl_overall=a.margin)
+    rep = run_parity(ifeval_data=a.ifeval_data, ifeval_candidate=a.ifeval_candidate, ifeval_control=a.ifeval_control,
+                     bfcl_questions=a.bfcl_questions, bfcl_answers=answers, bfcl_candidate=a.bfcl_candidate,
+                     bfcl_control=a.bfcl_control, margins=margins, seed=a.seed)
+    write_report(rep, a.json, a.md)
+    print(rep.to_markdown())
+    return {"pass": 0, "fail": 1, "inconclusive": 2}[rep.verdict]
 
 
 def cmd_tournament(a: argparse.Namespace) -> int:
@@ -179,7 +199,22 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--config", help="CPU-sized config to check (default: tiny)")
     s.add_argument("--json", help="write the JSON report here")
     s.add_argument("--md", help="write the markdown report here")
+    s.add_argument("--parity-report", help="JSON from `m63 parity`; anything but pass blocks release")
     s.set_defaults(fn=cmd_release)
+    s = sub.add_parser("parity", help="IFEval/BFCL instruction-following parity vs a text-only control "
+                                      "(exit 0 pass, 1 fail, 2 inconclusive)")
+    s.add_argument("--ifeval-data", required=True, help="IFEval prompts (official input_data.jsonl format)")
+    s.add_argument("--ifeval-candidate", required=True, help="candidate responses ({prompt|key, response} JSONL)")
+    s.add_argument("--ifeval-control", required=True, help="text-only control responses")
+    s.add_argument("--bfcl-questions", nargs="+", required=True, help="BFCL question files")
+    s.add_argument("--bfcl-answers", nargs="*", default=[], help="matching answer files ('none' for irrelevance)")
+    s.add_argument("--bfcl-candidate", required=True, help="candidate outputs ({id, result} JSONL)")
+    s.add_argument("--bfcl-control", required=True, help="text-only control outputs")
+    s.add_argument("--margin", type=float, default=2.0, help="non-inferiority margin in points")
+    s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--json")
+    s.add_argument("--md")
+    s.set_defaults(fn=cmd_parity)
     s = sub.add_parser("tournament", help="matched proxy tournament over configs/tournament variants")
     s.add_argument("--base", help="base config the variants override (default: configs/tiny.yaml)")
     s.add_argument("--variants", nargs="*", help="variant YAML files (default: configs/tournament/*.yaml)")

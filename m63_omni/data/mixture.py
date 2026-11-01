@@ -31,7 +31,7 @@ position; :func:`compute_shares` is the inverse and is used to verify it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
@@ -52,6 +52,7 @@ __all__ = [
     "compute_normalized_weights",
     "compute_shares",
     "stage_position_budget",
+    "text_control_budget",
     "validate_curriculum",
     "MixtureError",
 ]
@@ -79,7 +80,7 @@ class StageMixture:
     sampling_percent: Mapping[str, float]  # the stage's mix (after any warm-up)
     purpose: str
     warmup_positions: int = 0  # leading positions of the stage sampled from ``warmup_percent`` instead
-    warmup_percent: Mapping[str, float] = MappingProxyType({})
+    warmup_percent: Mapping[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sampling_percent", MappingProxyType(dict(self.sampling_percent)))
@@ -226,6 +227,17 @@ def stage_position_budget(stage: str | StageMixture, weights: Mapping[str, float
     # put rounding residue on text so the stage total is exact
     budget["text_code"] = budget.get("text_code", 0) + st.positions - sum(budget.values())
     return budget
+
+
+def text_control_budget(stages: Sequence[StageMixture] = STAGES) -> dict[str, int]:
+    """Text/code positions per stage: the text-only control for the parity gate trains on exactly these.
+
+    The control is the candidate's configuration with the multimodal front end
+    disabled, fed the candidate's own text/code stream (same documents, order,
+    and stage boundaries) with the media batches removed, so the comparison
+    isolates what multimodal training does to instruction following.
+    """
+    return {s.name: stage_position_budget(s)["text_code"] for s in stages}
 
 
 def validate_curriculum(stages: Sequence[StageMixture] = STAGES, total: int = TOTAL_POSITIONS) -> None:
