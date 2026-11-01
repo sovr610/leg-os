@@ -13,7 +13,7 @@ tool-orchestration control plane.
 > (build-program steps 0–4): every component exists as a readable, tested reference
 > implementation that optimised kernels and the distributed stack must match. There are
 > **no trained weights** and **no capability or benchmark claims**. See
-> [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) for the section-by-section map,
+> [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) for the section-by-section map, [`docs/DATASETS.md`](docs/DATASETS.md) for the training-data survey and plan,
 > documented design decisions, and what remains.
 
 ## What is here

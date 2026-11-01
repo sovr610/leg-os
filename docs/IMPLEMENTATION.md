@@ -15,7 +15,7 @@ makes no capability claims**.
 | §5 Native multimodal front end & token economics | `model/encoders.py`, `model/interleave.py`, `data/media.py` | `tests/model/test_multimodal.py`, `tests/data/` (114,200-position budget) |
 | §6 Titans-style memory & state governance | `model/memory.py`, `kernels/memory.py`, `runtime/session.py`, `runtime/event_log.py` | `tests/model/test_memory.py`, `tests/runtime/test_session.py`, `eval/security.py` |
 | §7 MoE routing, stability, capacity controls | `model/moe.py`, `train/monitor.py` | `tests/model/test_moe_routing.py`, `tests/train/test_training.py` |
-| §8 Data engine & curriculum | `m63_omni/data/*` | `tests/data/*` |
+| §8 Data engine & curriculum | `m63_omni/data/*`; dataset survey and sourcing plan in [`DATASETS.md`](DATASETS.md) | `tests/data/*` |
 | §9 Objectives, hyperparameters | `train/objectives.py`, `train/schedule.py`, `train/trainer.py` | `tests/train/test_training.py` |
 | §10 Orchestrator contracts, verification, escalation | `m63_omni/agent/*` | `tests/agent/*` |
 | §11 Distributed layout, repository layout | `train/parallel.py`, `configs/*` | `tests/train/test_training.py::test_parallel_layouts`, `tests/test_config.py` |
