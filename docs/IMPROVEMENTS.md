@@ -92,10 +92,10 @@ out two terms:
 - the MTP module plus its share of the 131K-vocab head (**+13.0%**) [D];
 - long-context attention across Stages A–D (**~+18%**, an upper bound: dense causal masking at
   each stage's mean packed length) [D];
-- smaller terms: the vision tower over patches (~+4.7% at 4 patches per visual position, if trained)
-  and the chunked GDN/KDA arithmetic (+0.7%) [D].
+- smaller terms: the vision tower over patches (~+4.0% at 4 patches per visual position with the
+  text-heavy Stage A, if trained) and the chunked GDN/KDA arithmetic (+0.7%) [D].
 
-A re-derived total is **≈2.1e23 FLOPs** (2.14e23) [D]; `m63 capacity` prints the breakdown from
+A re-derived total is **≈2.1e23 FLOPs** (2.13e23) [D]; `m63 capacity` prints the breakdown from
 `runtime.capacity.training_compute`. The 250 TFLOP/s figure also names no GPU. Comparable
 5B-active MoEs measure **~150–210 TFLOP/s/GPU on H100 BF16**, even with ideal routing [GH,
 Megatron-Bridge performance tables].
@@ -185,7 +185,7 @@ matched shared capacity, keeps total and active parameters identical (62.50B / 4
 | Audio trained at 12.5 Hz, inferred at 6.25 Hz via a learned 2× pool | Qwen moved 25 → 12.5 → 6.25 Hz, but its 6.25 Hz encoder saw ~40M hours [S/GH]. Cleared speech is ~2.5–3M h. | Audio hours 21.8M → 10.9M; ~2.7M at ≤4 epochs, about equal to supply [D] | **Ablate** |
 | Audio encoder init from Whisper (MIT) | Ming, Ola, Baichuan, and Kimi use Whisper encoders [GH] | Avoids an encoder trained from scratch on limited hours | **Ablate** (shape change; training-data provenance [U]) |
 | Timing contract: model gives ±160 ms, sidecars snap to frames or words | 6.25 Hz ≈ 4.8 frames at 30 fps [D] | Frame accuracy becomes a tool guarantee | **Adopt** |
-| **Stage A text-heavy**: 70 / 12 / 5 / 8 / 5 (text / image / video / audio / AV), plus a text warm-up | Qwen3-Omni general stage: ~2.5% each for video and AV [S]. Omni models regressed on instruction following [GH]. | Protects tool and JSON adherence; shrinks the media gap | **Adopt**; ablate warm-up length. Supersede with the supply cap in §2. |
+| **Stage A text-heavy**: 70 / 12 / 5 / 8 / 5 (text / image / video / audio / AV), plus a text warm-up | Qwen3-Omni general stage: ~2.5% each for video and AV [S]. Omni models regressed on instruction following [GH]. | Protects tool and JSON adherence; shrinks the media gap | **Adopt** (now the code default: 0.35T text-only warm-up, then this mix); ablate warm-up length. Supersede with the supply cap in §2. |
 | Recaptions ~50/50 with originals; dense human narration on ~10⁵ videos | Recap-DataComp: +3.1% retrieval, best at p ≈ 0.5–0.6 original captions [S] | Skill coverage without 10⁷ hours | **Adopt** |
 
 The unique hours needed, combined [D]:
@@ -345,6 +345,7 @@ blueprint baseline. See the table at the end of this section.
 | 4. Node limit | `Router.node_limited` skips the restriction when `top_k ≤ max_nodes_per_token`, where it can never bind. |
 | 8. Chunk length | `multimodal.av_chunk_ms` (2000 in `recommended.yaml`) with `audio_attention: causal` and end-time audio assignment; `multimodal.timestamp_mode: text`. |
 | 9. Structured masks | Class trie + lazy DFA + pruning for regex masks; digit-only integer masks; brute-force equivalence tests. The O(L) KV append remains (reference only). |
+| Stage A mix (§4) | `data.mixture.STAGES`: 0.35T-position text-only warm-up, then 70 / 12 / 5 / 8 / 5; the blueprint table stays as `BLUEPRINT_STAGES`. The IFEval/BFCL parity gate is not built yet. |
 | §1 defaults | `kda` mixer kind (`kernels/kda.py`, `model/kda.py`); `configs/recommended.yaml`; tournament variants `kda`, `kv_heads_half`, `memory_off`, `text_timestamps`, `av_chunk_2s`, `recommended_defaults`. The text-only tournament reports multimodal-only variants as skipped rather than ranking ties. |
 
 ---

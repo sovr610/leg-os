@@ -16,7 +16,7 @@ makes no capability claims**.
 | §5 Native multimodal front end & token economics | `model/encoders.py`, `model/interleave.py`, `data/media.py` | `tests/model/test_multimodal.py`, `tests/data/` (114,200-position budget) |
 | §6 Titans-style memory & state governance | `model/memory.py`, `kernels/memory.py`, `runtime/session.py`, `runtime/event_log.py` | `tests/model/test_memory.py`, `tests/runtime/test_session.py`, `eval/security.py` |
 | §7 MoE routing, stability, capacity controls | `model/moe.py`, `train/monitor.py` | `tests/model/test_moe_routing.py`, `tests/train/test_training.py` |
-| §8 Data engine & curriculum | `m63_omni/data/*`; dataset survey and sourcing plan in [`DATASETS.md`](DATASETS.md) | `tests/data/*` |
+| §8 Data engine & curriculum | `m63_omni/data/*` (`data.mixture.STAGES` = text-heavy Stage A; `BLUEPRINT_STAGES` = the §8 table); dataset survey and sourcing plan in [`DATASETS.md`](DATASETS.md) | `tests/data/*` |
 | §9 Objectives, hyperparameters | `train/objectives.py`, `train/schedule.py`, `train/trainer.py` | `tests/train/test_training.py` |
 | §10 Orchestrator contracts, verification, escalation | `m63_omni/agent/*` | `tests/agent/*` |
 | §11 Distributed layout, repository layout | `train/parallel.py`, `configs/*` | `tests/train/test_training.py::test_parallel_layouts`, `tests/test_config.py` |
@@ -114,6 +114,11 @@ makes no capability claims**.
     the channel-wise forget gate and sigmoid output gate as rank-`key_dim` projections (Kimi Linear);
     at reference shape the 36 mixers hold 1.268B parameters vs 1.516B for GDN. The chunked kernel
     forms pairwise per-channel decays explicitly per chunk, so it is exact for any decay strength.
+16. **Stage A mix.** The default curriculum replaces the §8 Stage A starting point
+    (60 / 10 / 10 / 10 / 10) with a text-heavy one: the first 0.35T positions are text-only,
+    then 70 / 12 / 5 / 8 / 5 (73% text over the stage). Stages B–D are unchanged and the blueprint
+    table remains available as `BLUEPRINT_STAGES`. The warm-up length is a starting point for the
+    proxy ablation, not a measured value.
 
 ## Design review
 

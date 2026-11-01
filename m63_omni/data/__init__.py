@@ -81,6 +81,7 @@ from .media import (
     select_policy,
 )
 from .mixture import (
+    BLUEPRINT_STAGES,
     MIXTURE_KEYS,
     STAGES,
     TOTAL_POSITIONS,
@@ -89,6 +90,7 @@ from .mixture import (
     compute_normalized_weights,
     compute_shares,
     get_stage,
+    mixture_at,
     stage_at,
     stage_position_budget,
     validate_curriculum,
@@ -152,7 +154,7 @@ __all__ = [
     "estimate_session_tokens", "PolicyDecision", "TokenBudgetError", "select_policy", "AVChunk", "plan_av_chunks",
     "image_tokens", "interleave_av_tokens",
     # mixture
-    "MIXTURE_KEYS", "StageMixture", "STAGES", "TOTAL_POSITIONS", "get_stage", "stage_at",
+    "MIXTURE_KEYS", "StageMixture", "STAGES", "BLUEPRINT_STAGES", "TOTAL_POSITIONS", "get_stage", "stage_at", "mixture_at",
     "compute_normalized_weights", "compute_shares", "stage_position_budget", "validate_curriculum", "MixtureError",
     # packing
     "IGNORE_INDEX", "TokenizedDoc", "SegmentInfo", "PackedBatch", "pack_documents", "single_document_batch",

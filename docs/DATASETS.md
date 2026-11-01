@@ -113,6 +113,12 @@ gives this budget (trillions of positions):
 | D: memory, ultra-long | 0.15 | 0.068 | 0.008 | 0.030 | 0.015 | 0.030 |
 | **Total** | **4.75** | **2.735** | **0.483** | **0.538** | **0.490** | **0.505** |
 
+**Code default since the design review.** `data.mixture.STAGES` now makes Stage A text-heavy
+(`docs/IMPROVEMENTS.md` §4): a 0.35T-position text-only warm-up, then 70 / 12 / 5 / 8 / 5. Stage A
+becomes 2.555 / 0.378 / 0.158 / 0.252 / 0.158T, and the totals become **3.190 / 0.511 / 0.345 / 0.392 /
+0.313T**: about 36% fewer video positions, 20% fewer audio, and 38% fewer synchronized AV. The hours
+below use the blueprint table (`data.mixture.BLUEPRINT_STAGES`), so they are an upper bound.
+
 **Converting positions to raw data.** Media-only rates from blueprint §5: video 8 positions/s
 (0.5 fps × 16 tokens) by default and 64/s at high detail; audio 6.25/s, or 12.5/s at high fidelity.
 Paired caption or transcript text adds a few percent and slightly lowers the hours needed.
@@ -248,7 +254,7 @@ Deduplicate across all pools before counting tokens: Zyda-2 and Dolma 3 overlap 
 
 **Suggested image mix.**
 
-Stage A (~350B positions):
+Stage A (~380B positions in the text-heavy default; 350B in the blueprint table):
 
 | Share | Content | Detail |
 |---|---|---|

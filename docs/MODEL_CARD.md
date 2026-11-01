@@ -39,8 +39,8 @@ Blueprint reference: 62.481B resident, 4.96B active excl. head, 5.501B incl. hea
 ## Training compute (derived, §8 curriculum)
 
 - 6·N·D with the tied head: 1.568e+23 FLOPs over 4.75T positions
-- Terms 6·N·D omits: MTP +13.0%, attention +17.9%, recurrent mixers +0.7%, vision encoder +4.7% (assumes 4 patches per visual position)
-- Total 2.137e+23 FLOPs: h100_bf16 ~54 days on 256 GPUs, h100_fp8 ~39 days on 256 GPUs, b200_bf16 ~28 days on 256 GPUs, b200_mxfp8 ~20 days on 256 GPUs
+- Terms 6·N·D omits: MTP +13.0%, attention +17.9%, recurrent mixers +0.7%, vision encoder +4.0% (assumes 4 patches per visual position)
+- Total 2.125e+23 FLOPs: h100_bf16 ~53 days on 256 GPUs, h100_fp8 ~38 days on 256 GPUs, b200_bf16 ~27 days on 256 GPUs, b200_mxfp8 ~20 days on 256 GPUs
 
 ## Limitations (always stated)
 

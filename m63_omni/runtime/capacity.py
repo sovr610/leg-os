@@ -226,7 +226,7 @@ def _stage_rows(stages: Optional[Sequence]) -> list[tuple[float, float, float]]:
         stages = STAGES
     rows = []
     for st in stages:
-        sp = st.sampling_percent
+        sp = st.effective_percent  # includes any text-only warm-up
         visual = (sp.get("image", 0.0) + sp.get("video", 0.0) + 0.5 * sp.get("av", 0.0)) / 100.0
         rows.append((float(st.positions), (st.seq_len_start + st.seq_len_end) / 2.0, visual))
     return rows
