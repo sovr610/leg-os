@@ -27,7 +27,7 @@ tool-orchestration control plane.
 | `m63_omni/runtime` | Authoritative hash-chained event log with branches and verified deletion, sessions (governed memory writes, media ingest via the artifact store, frozen-memory generation, CoW forks, branch adoption, replay, TTL reclaim), schema-guided decoding and the `ModelPlanner` that drives the orchestrator, paged KV with copy-on-write, safety-keyed prefix cache, MTP speculative decoding with full state rollback, capacity arithmetic |
 | `m63_omni/agent` | `m63.actions/v1` envelopes, tool registry, deterministic control plane (static validation, permissions, idempotency, sandboxed execution, signed receipts), verifiers, calibrated escalation, orchestration loop |
 | `m63_omni/eval` | Bootstrap CIs and per-cohort reports, scorer self-tests, release gates, long-context probes, efficiency and runtime-security suites |
-| `configs/` | `full.yaml` (the blueprint §11 config), `long_context`, `serving`, `pilot` (10.6B/2.3B active), `proxy_1b3`, `proxy_300m`, and the proxy-tournament variants (1:1, 3:1, 7:1, full-attention control, memory-off, top-1/top-4, no-shared-expert) |
+| `configs/` | `full.yaml` (the blueprint §11 config), `long_context`, `serving`, `pilot` (10.6B/2.3B active), `proxy_1b3`, `proxy_300m`, and the proxy-tournament variants (1:1, 3:1, 7:1, full-attention control, memory-off, memory decay-to-M0, top-1/top-4, no-shared-expert) |
 
 ## Quick start
 
@@ -53,6 +53,10 @@ m63 train --steps 100
 
 ```bash
 m63 release-check
+```
+
+```bash
+m63 tournament --steps 20
 ```
 
 `m63 manifest` instantiates the full model on PyTorch's `meta` device and counts every
@@ -122,10 +126,17 @@ authorises, executes, signs, and verifies each call.
 * Untrusted content and generation never write persistent memory; cross-tenant reads fail;
   deletion is verifiable (including media blobs); memory snapshots are invalidated by
   model/tokenizer upgrades.
+* Optional backends (FlexAttention block masks, `torch._grouped_mm` MoE, the
+  flash-linear-attention GDN adapter, MTP drafting with an incremental cache) match the
+  references; the MTP cache computes ~36x fewer drafter positions on a 300-token prompt.
+* Every kernel and both mixer layers pass float64 finite-difference gradient checks; the
+  Appendix B boundary lengths (through 32K at kernel level) and the maximum context are
+  tested; sampled speculative decoding passes chi-square distribution tests.
 * `m63 release-check` produces evidence for all six non-negotiable gates; injected tool
   output that a planner *obeys* still executes nothing unauthorised.
 * CI (`.github/workflows/ci.yml`) runs lint, config validation, the test suite, the
-  model-card freshness check, and the release check on Python 3.11–3.13.
+  model-card freshness check, and the release check on Python 3.11–3.13; a nightly job runs
+  the slow tests and a tournament smoke run.
 
 ## Repository layout
 

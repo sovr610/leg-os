@@ -3,6 +3,8 @@ name: ci
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "17 3 * * *"  # nightly: slow tests (32K boundary, end-to-end sampling statistics) + tournament smoke run
   workflow_dispatch:
 
 concurrency:
@@ -15,6 +17,7 @@ permissions:
 jobs:
   test:
     name: tests (python ${{ matrix.python }})
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -51,3 +54,31 @@ jobs:
           path: release-check.*
           if-no-files-found: ignore
 
+  nightly:
+    name: nightly (slow tests + tournament smoke run)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install (CPU PyTorch)
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]"
+      - name: Slow tests
+        run: pytest -m slow
+      - name: Proxy tournament (tiny-scale smoke run of every variant)
+        run: m63 tournament --steps 20 --batch 2 --json tournament.json --md tournament.md
+      - name: Proxy tournament with segmented memory (memory ablations only differ here)
+        run: m63 tournament --steps 20 --batch 2 --segmented-memory --json tournament-memory.json --md tournament-memory.md
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nightly-reports
+          path: tournament.*
+          if-no-files-found: ignore

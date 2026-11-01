@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ..kernels.precision import acc
+
 
 class RMSNorm(nn.Module):
     """Pre-RMSNorm. Statistics are computed in FP32 regardless of input dtype (§7)."""
@@ -18,9 +20,9 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        xf = x.float()
+        xf = acc(x)
         xf = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.eps)
-        return (xf * self.weight.float()).to(x.dtype)
+        return (xf * self.weight.to(xf.dtype)).to(x.dtype)
 
 
 class SwiGLU(nn.Module):

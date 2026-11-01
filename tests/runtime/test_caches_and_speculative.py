@@ -62,11 +62,12 @@ def test_prefix_cache_keys_never_cross_tenants_or_assets():
     assert len(pc) == 2 and pc.evict_tenant("t1") == 1
 
 
+@pytest.mark.parametrize("use_cache", [True, False])
 @pytest.mark.parametrize("draft", [1, 2, 3])
-def test_greedy_speculative_equals_target_only(model, cfg, rand_ids, draft):
+def test_greedy_speculative_equals_target_only(model, cfg, rand_ids, draft, use_cache):
     p = rand_ids(cfg, 1, 14)
     a, ca, _ = speculative.generate(model, p, 11, draft_tokens=0)
-    b, cb, st = speculative.generate(model, p, 11, draft_tokens=draft)
+    b, cb, st = speculative.generate(model, p, 11, draft_tokens=draft, use_mtp_cache=use_cache)
     assert a.tolist() == b.tolist()
     assert ca.next_pos == cb.next_pos == 14 + 11
     nxt = torch.tensor([[a[-1]]])
@@ -75,13 +76,13 @@ def test_greedy_speculative_equals_target_only(model, cfg, rand_ids, draft):
 
 
 def test_rejected_drafts_roll_back_every_state(model, cfg, rand_ids, monkeypatch):
-    real = speculative._draft
+    real = speculative._draft_cached
 
-    def bad_draft(m, h, ids, k, t, g):
-        d, q = real(m, h, ids, k, t, g)
+    def bad_draft(m, mc, h, nxt, k, t, g):
+        d, q = real(m, mc, h, nxt, k, t, g)
         return [(x + 1) % 50 for x in d], q  # always wrong
 
-    monkeypatch.setattr(speculative, "_draft", bad_draft)
+    monkeypatch.setattr(speculative, "_draft_cached", bad_draft)
     p = rand_ids(cfg, 1, 9)
     ref, cref, _ = speculative.generate(model, p, 8, draft_tokens=0)
     out, cout, st = speculative.generate(model, p, 8, draft_tokens=2)
@@ -97,3 +98,13 @@ def test_stochastic_speculative_is_seeded(model, cfg, rand_ids):
             for _ in range(2)]
     assert runs[0].tolist() == runs[1].tolist()
     assert all(0 <= t < cfg.model.vocab_size for t in runs[0].tolist())
+
+
+@pytest.mark.parametrize("temperature", [0.0, 1.0])
+def test_mtp_cache_drafts_equal_full_recompute(model, cfg, rand_ids, temperature):
+    p = rand_ids(cfg, 1, 30)
+    runs = [speculative.generate(model, p, 20, draft_tokens=3, temperature=temperature, use_mtp_cache=c,
+                                 generator=torch.Generator().manual_seed(7)) for c in (False, True)]
+    (a, _, sa), (b, _, sb) = runs
+    assert a.tolist() == b.tolist() and sa.accept_history == sb.accept_history
+    assert sb.mtp_positions < sa.mtp_positions / 3

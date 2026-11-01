@@ -18,8 +18,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..config import GDNConfig
+from ..kernels.precision import acc
 from ..kernels.gdn import causal_depthwise_conv, gdn_chunked, gdn_recurrent_reference
 from .cache import GDNLayerState
+
+GDN_BACKENDS = ("chunked", "fla")
 
 
 class GatedDeltaNet(nn.Module):
@@ -41,6 +44,7 @@ class GatedDeltaNet(nn.Module):
         self.dt_bias = nn.Parameter(torch.empty(H))
         self.o_norm_weight = nn.Parameter(torch.ones(Dv))
         self.eps = eps
+        self.backend = "chunked"  # "chunked" (reference) | "fla" (Triton, GPU); decode always uses the recurrent path
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -72,23 +76,27 @@ class GatedDeltaNet(nn.Module):
         qkv, new_conv = causal_depthwise_conv(qkv, self.conv_weight, conv_state=conv_state, reset=reset)
         qkv = F.silu(qkv)
         q, k, v = qkv.split([H * Dk, H * Dk, H * Dv], dim=-1)
-        q = F.normalize(q.view(B, T, H, Dk).float(), dim=-1, eps=1e-6)
-        k = F.normalize(k.view(B, T, H, Dk).float(), dim=-1, eps=1e-6)
+        q = F.normalize(acc(q.view(B, T, H, Dk)), dim=-1, eps=1e-6)
+        k = F.normalize(acc(k.view(B, T, H, Dk)), dim=-1, eps=1e-6)
         v = v.view(B, T, H, Dv)
         # FP32 decay / gate arithmetic (§4, §7)
-        g = -torch.exp(self.A_log.float()) * F.softplus(self.a_proj(x).float() + self.dt_bias.float())
-        beta = torch.sigmoid(self.b_proj(x).float())
+        g = -torch.exp(acc(self.A_log)) * F.softplus(acc(self.a_proj(x)) + acc(self.dt_bias))
+        beta = torch.sigmoid(acc(self.b_proj(x)))
         init = None if state is None else state.recurrent
         if mode == "auto":
             mode = "recurrent" if T == 1 else "chunked"
-        if mode == "chunked":
+        if mode == "chunked" and self.backend == "fla":
+            from ..kernels.gdn_fla import gdn_fla
+
+            o, S = gdn_fla(q, k, v, g, beta, initial_state=init, reset=reset)
+        elif mode == "chunked":
             o, S = gdn_chunked(q, k, v, g, beta, chunk_size=self.cfg.train_chunk, initial_state=init, reset=reset)
         elif mode == "recurrent":
             o, S = gdn_recurrent_reference(q, k, v, g, beta, initial_state=init, reset=reset)
         else:
             raise ValueError(f"unknown GDN mode {mode!r}")
-        o = o.float()
-        o = o * torch.rsqrt(o.pow(2).mean(-1, keepdim=True) + self.eps) * self.o_norm_weight.float()
+        o = acc(o)
+        o = o * torch.rsqrt(o.pow(2).mean(-1, keepdim=True) + self.eps) * self.o_norm_weight.to(o.dtype)
         o = o.to(x.dtype).reshape(B, T, H * Dv)
         if self.g_proj is not None:
             o = o * F.silu(self.g_proj(x))

@@ -95,6 +95,7 @@ class MemoryConfig:
     max_alpha: float = 0.1  # forgetting gate bound
     grad_clip: float = 1.0  # per-tensor inner-gradient norm clip
     state_dtype: str = "bfloat16"  # storage dtype for session snapshots
+    decay_target: str = "zero"  # forgetting pulls M toward "zero" (blueprint §6) or the learned "init" M0 (ablation)
 
 
 @dataclass(frozen=True)
@@ -337,6 +338,8 @@ def validate(cfg: M63Config) -> None:
                 errs.append(f"memory anchor {anchor} is not an attention layer")
         if len(mem.mlp_shape) != 3 or mem.mlp_shape[0] != mem.mlp_shape[2]:
             errs.append("memory.mlp_shape must be [d_mem, d_hidden, d_mem]")
+        if mem.decay_target not in ("zero", "init"):
+            errs.append("memory.decay_target must be 'zero' or 'init'")
         if mem.untrusted_persistent_writes:
             errs.append("memory.untrusted_persistent_writes must be false (§6 memory governance)")
     if cfg.mtp.enabled and cfg.mtp.mixer != "standard_gqa":

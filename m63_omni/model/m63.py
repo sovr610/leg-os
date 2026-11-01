@@ -37,6 +37,10 @@ from .mtp import MTPModule
 IGNORE_INDEX = -100
 
 
+class ContextLengthError(ValueError):
+    """The stream would exceed the largest configured context target (never truncated silently, §5)."""
+
+
 class HybridBlock(nn.Module):
     def __init__(self, cfg: M63Config, layer_idx: int, kind: str) -> None:
         super().__init__()
@@ -147,12 +151,31 @@ class M63Omni(nn.Module):
     def init_memory(self, batch: int, dtype: torch.dtype = torch.float32) -> dict[int, MemoryState]:
         return {i: self.memory[str(i)].init_state(batch, self.embed.weight.device, dtype) for i in self.anchor_indices}
 
-    def set_kernel_mode(self, *, moe_impl: Optional[str] = None, reference_attention: Optional[bool] = None) -> None:
+    def set_kernel_mode(self, *, moe_impl: Optional[str] = None, reference_attention: Optional[bool] = None,
+                        attention_backend: Optional[str] = None, gdn_backend: Optional[str] = None) -> None:
+        """Select kernels (never numerics): every backend must match the naive reference in tests."""
+        from ..kernels.moe import IMPLEMENTATIONS
+        from .attention import ATTENTION_BACKENDS
+        from .gdn import GDN_BACKENDS
+
+        if moe_impl is not None and moe_impl not in IMPLEMENTATIONS:
+            raise ValueError(f"unknown MoE implementation {moe_impl!r}; available: {sorted(IMPLEMENTATIONS)}")
+        if attention_backend is not None and attention_backend not in ATTENTION_BACKENDS:
+            raise ValueError(f"unknown attention backend {attention_backend!r}")
+        if gdn_backend is not None and gdn_backend not in GDN_BACKENDS:
+            raise ValueError(f"unknown GDN backend {gdn_backend!r}")
+        attn = attention_backend or (None if reference_attention is None else ("reference" if reference_attention else "sdpa"))
+        mtp_attn = [self.mtp.attn] if self.mtp is not None else []
         for b in self.blocks:
             if moe_impl is not None:
                 b.moe.impl = moe_impl
-            if reference_attention is not None and b.kind == GATED_GQA:
-                b.mixer.use_reference_kernel = reference_attention
+            if attn is not None and b.kind == GATED_GQA:
+                b.mixer.backend = attn
+            if gdn_backend is not None and b.kind == GDN:
+                b.mixer.backend = gdn_backend
+        for a in mtp_attn:
+            if attn is not None:
+                a.backend = attn
 
     @torch.no_grad()
     def update_router_biases(self, stats: list[RouterStats]) -> None:
@@ -191,6 +214,12 @@ class M63Omni(nn.Module):
             raise ValueError("pass exactly one of input_ids / inputs_embeds")
         x = self.embed(input_ids) if inputs_embeds is None else inputs_embeds
         B, T, _ = x.shape
+        end = (cache.next_pos if cache is not None else 0) + T
+        max_ctx = max(self.cfg.model.context_targets)
+        if end > max_ctx:
+            raise ContextLengthError(
+                f"stream position {end} exceeds the supported context of {max_ctx}; use the extended-context "
+                "configuration, a shorter working interval, or memory-backed chunked ingestion (§5)")
         idx = resolve_stream(B, T, x.device, cache, reset_mask, segment_ids, position_ids)
         valid = idx.seg >= 0
         use_memory = memory_enabled and self.cfg.memory.enabled and len(self.memory) > 0

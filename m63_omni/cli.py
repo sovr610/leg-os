@@ -105,6 +105,21 @@ def cmd_release(a: argparse.Namespace) -> int:
     return 0 if rep.passed else 1
 
 
+def cmd_tournament(a: argparse.Namespace) -> int:
+    from .config import load_config
+    from .train.tournament import build_candidates, run_tournament, write_report
+
+    root = Path(__file__).resolve().parent.parent
+    base = load_config(a.base or root / "configs" / "tiny.yaml")
+    variants = a.variants or sorted(str(p) for p in (root / "configs" / "tournament").glob("*.yaml"))
+    rep = run_tournament(build_candidates(base, variants), steps=a.steps, batch=a.batch, seed=a.seed, budget=a.budget,
+                         reference=a.reference, max_kv_bytes_per_token=a.max_kv_bytes, max_tpot_ms=a.max_tpot_ms,
+                         segmented_memory=a.segmented_memory, log=lambda s: print(s, flush=True))
+    write_report(rep, a.json, a.md)
+    print(rep.to_markdown())
+    return 0
+
+
 def cmd_validate(a: argparse.Namespace) -> int:
     from .config import load_config
 
@@ -153,6 +168,21 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--json", help="write the JSON report here")
     s.add_argument("--md", help="write the markdown report here")
     s.set_defaults(fn=cmd_release)
+    s = sub.add_parser("tournament", help="matched proxy tournament over configs/tournament variants")
+    s.add_argument("--base", help="base config the variants override (default: configs/tiny.yaml)")
+    s.add_argument("--variants", nargs="*", help="variant YAML files (default: configs/tournament/*.yaml)")
+    s.add_argument("--steps", type=int, default=50)
+    s.add_argument("--batch", type=int, default=4)
+    s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--budget", choices=["positions", "flops"], default="positions")
+    s.add_argument("--reference", help="candidate whose active compute defines the FLOPs budget")
+    s.add_argument("--max-kv-bytes", type=float, help="systems gate: max KV bytes per token")
+    s.add_argument("--max-tpot-ms", type=float, help="systems gate: max time per output token")
+    s.add_argument("--segmented-memory", action="store_true",
+                   help="train/evaluate segment by segment so memory updates happen (needed for memory ablations)")
+    s.add_argument("--json")
+    s.add_argument("--md")
+    s.set_defaults(fn=cmd_tournament)
     s = sub.add_parser("validate-configs", help="strictly validate every YAML config")
     s.add_argument("--dir", default="configs")
     s.set_defaults(fn=cmd_validate)

@@ -16,9 +16,11 @@ import torch
 import torch.nn as nn
 
 from ..config import AttentionConfig
-from ..kernels.attention import attention, attention_reference, build_attention_mask
+from ..kernels.attention import attention, attention_flex, attention_reference, build_attention_mask
 from .cache import KVLayerState, StreamIndex
 from .layers import PartialRotary, RMSNorm
+
+ATTENTION_BACKENDS = ("sdpa", "reference", "flex")
 
 
 class GatedGQA(nn.Module):
@@ -35,7 +37,15 @@ class GatedGQA(nn.Module):
         self.q_norm = RMSNorm(self.D, eps) if cfg.qk_norm else None
         self.k_norm = RMSNorm(self.D, eps) if cfg.qk_norm else None
         self.rope = PartialRotary(cfg.rotary_dims, cfg.rope_theta)
-        self.use_reference_kernel = False
+        self.backend = "sdpa"  # "sdpa" | "reference" | "flex" (kernel choice only; numerics must match)
+
+    @property
+    def use_reference_kernel(self) -> bool:  # backwards-compatible alias
+        return self.backend == "reference"
+
+    @use_reference_kernel.setter
+    def use_reference_kernel(self, value: bool) -> None:
+        self.backend = "reference" if value else "sdpa"
 
     def _kv(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         B, T, _ = x.shape
@@ -67,9 +77,12 @@ class GatedGQA(nn.Module):
             mk, mv = self._kv(extra_kv)  # memory tokens: no RoPE
             keys, values = torch.cat([mk, keys], dim=2), torch.cat([mv, values], dim=2)
             n_mem = extra_kv.shape[1]
-        mask = build_attention_mask(idx.stream_pos, idx.seg, new_state.pos, new_state.seg, n_mem)
-        attn_fn = attention_reference if self.use_reference_kernel else attention
-        o = attn_fn(q, keys, values, mask)  # [B, Hq, T, D]
+        if self.backend == "flex":
+            o = attention_flex(q, keys, values, idx.stream_pos, idx.seg, new_state.pos, new_state.seg, n_mem)
+        else:
+            mask = build_attention_mask(idx.stream_pos, idx.seg, new_state.pos, new_state.seg, n_mem)
+            attn_fn = attention_reference if self.backend == "reference" else attention
+            o = attn_fn(q, keys, values, mask)  # [B, Hq, T, D]
         o = o.transpose(1, 2).reshape(B, T, self.Hq * self.D)
         if self.gate_proj is not None:
             o = o * torch.sigmoid(self.gate_proj(x))

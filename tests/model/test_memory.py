@@ -90,3 +90,32 @@ def test_segmented_training_reaches_memory_parameters(cfg, rand_ids):
     a = m.memory[str(m.anchor_indices[0])]
     for p in (a.W1_0, a.k_proj.weight, a.v_proj.weight, a.o_proj.weight, a.gate.weight):
         assert p.grad is not None and p.grad.abs().sum() > 0
+
+
+@pytest.mark.parametrize("target", ["zero", "init"])
+def test_memory_decay_target(target):
+    from m63_omni.config import tiny
+    from m63_omni.model.m63 import M63Omni
+
+    torch.manual_seed(0)
+    m = M63Omni(tiny(memory={"decay_target": target, "max_alpha": 0.5}, multimodal={"enabled": False}))
+    anchor = m.memory[str(m.anchor_indices[0])]
+    with torch.no_grad():
+        anchor.gate.bias.copy_(torch.tensor([0.0, -30.0, 30.0]))  # no inner learning step, maximal forgetting
+    st = anchor.init_state(1)
+    st.W1 = st.W1 + torch.randn_like(st.W1)  # start away from M0
+    h = torch.randn(1, 16, m.cfg.model.hidden_size)
+    for _ in range(40):
+        st, _ = anchor.update(st, h)
+    to_m0 = float((st.W1[0] - anchor.W1_0).detach().norm())
+    if target == "init":
+        assert to_m0 < 1e-3  # forgetting returns to the learned initial memory
+    else:
+        assert float(st.W1.detach().norm()) < 1e-3 and to_m0 > 0.5  # forgetting erodes M0 itself
+
+
+def test_memory_decay_target_is_validated():
+    from m63_omni.config import ConfigError, tiny
+
+    with pytest.raises(ConfigError, match="decay_target"):
+        tiny(memory={"decay_target": "half"})

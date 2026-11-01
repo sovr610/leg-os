@@ -19,6 +19,7 @@ import torch.nn as nn
 
 from ..common import Modality
 from ..config import MoEConfig
+from ..kernels.precision import acc
 from ..kernels.moe import IMPLEMENTATIONS, TokenDropError, expert_counts
 from .layers import SwiGLU
 
@@ -48,7 +49,7 @@ class Router(nn.Module):
     def forward(self, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """h: [N, d] -> (idx [N,k], weights [N,k] fp32, affinity [N,E] fp32, logits [N,E] fp32)."""
         cfg = self.cfg
-        logits = h.float() @ self.weight.float().t()
+        logits = acc(h) @ acc(self.weight).t()
         s = torch.sigmoid(logits)
         sel = s + self.bias
         n_nodes = cfg.routed_experts // cfg.experts_per_node
@@ -67,7 +68,7 @@ class Router(nn.Module):
     @torch.no_grad()
     def update_bias(self, counts: torch.Tensor) -> None:
         """Auxiliary-loss-free balancing: raise the bias of under-loaded experts (DeepSeek-V3)."""
-        c = counts.float().to(self.bias.device)
+        c = counts.to(device=self.bias.device, dtype=self.bias.dtype)
         if c.sum() <= 0:
             return
         self.bias.add_(self.cfg.bias_update_rate * torch.sign(c.mean() - c))

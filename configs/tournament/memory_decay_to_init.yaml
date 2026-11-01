@@ -1,0 +1,3 @@
+# Memory ablation: forgetting decays toward the learned M0 instead of zero (see model/memory.py).
+extends: ../proxy_1b3.yaml
+memory: {decay_target: init}

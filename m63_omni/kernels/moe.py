@@ -97,4 +97,38 @@ def moe_padded_bmm(
     return out
 
 
+def grouped_mm_available() -> bool:
+    return hasattr(torch, "_grouped_mm")
+
+
+def moe_grouped_mm(
+    x: torch.Tensor, idx: torch.Tensor, weight: torch.Tensor, w_gate: torch.Tensor, w_up: torch.Tensor, w_down: torch.Tensor
+) -> torch.Tensor:
+    """One grouped GEMM per projection via ``torch._grouped_mm`` (variable-size expert groups).
+
+    Tokens are permuted so each expert's slots are contiguous and the three
+    projections each run as a single grouped matmul over all experts — no Python
+    loop over experts. On GPU this targets the CUTLASS grouped-GEMM kernels
+    (BF16, dims aligned to 16); it is a private PyTorch API, so callers must gate on
+    :func:`grouped_mm_available` and keep the reference as the fallback.
+    """
+    N, k = idx.shape
+    E = w_gate.shape[0]
+    flat_idx = idx.reshape(-1)
+    order = torch.argsort(flat_idx, stable=True)
+    counts = expert_counts(idx, E)
+    if int(counts.sum()) != N * k:
+        raise TokenDropError("grouped-mm dispatch lost token slots")
+    offs = torch.cumsum(counts, 0).to(torch.int32)
+    xs = x[order // k]
+    h = F.silu(torch._grouped_mm(xs, w_gate, offs=offs)) * torch._grouped_mm(xs, w_up, offs=offs)
+    ys = torch._grouped_mm(h, w_down, offs=offs)
+    ws = weight.reshape(-1)[order].unsqueeze(-1).to(x.dtype)
+    out = torch.zeros_like(x)
+    out.index_add_(0, order // k, ys * ws)
+    return out
+
+
 IMPLEMENTATIONS = {"reference": moe_reference, "grouped": moe_grouped, "padded": moe_padded_bmm}
+if grouped_mm_available():
+    IMPLEMENTATIONS["grouped_mm"] = moe_grouped_mm

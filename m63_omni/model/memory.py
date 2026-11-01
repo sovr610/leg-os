@@ -17,7 +17,12 @@ Updates (only at segment boundaries, never during token-by-token generation)::
 
     g_t = clip(grad_M l(M; k_t, v_t))
     s_t = eta_t s_{t-1} - theta_t g_t
-    M_t = (1 - alpha_t) M_{t-1} + s_t
+    M_t = (1 - alpha_t) M_{t-1} + s_t                    # decay_target = "zero" (blueprint)
+    M_t = M0 + (1 - alpha_t) (M_{t-1} - M0) + s_t        # decay_target = "init" (ablation)
+
+With ``"zero"`` forgetting erodes the learned initial memory over long
+sessions; ``"init"`` forgets *toward* ``M0`` instead. Which is better is an
+empirical question for the proxy tournament (``configs/tournament/memory_decay_to_init.yaml``).
 
 Backbone weights never update at inference; the session owns only ``M`` and the
 momentum ``s`` (~3 MiB at BF16 for three anchors in the reference shape).
@@ -154,8 +159,13 @@ class NeuralMemoryAnchor(nn.Module):
         alpha = cfg.max_alpha * torch.sigmoid(gl[:, 2]).view(-1, 1, 1)
         S1 = clip_by_norm(eta * state.S1.float() - theta * g1, cfg.grad_clip)
         S2 = clip_by_norm(eta * state.S2.float() - theta * g2, cfg.grad_clip)
-        new_W1 = (1 - alpha) * W1 + S1
-        new_W2 = (1 - alpha) * W2 + S2
+        if cfg.decay_target == "init":
+            M1, M2 = self.W1_0.to(W1.dtype).unsqueeze(0), self.W2_0.to(W2.dtype).unsqueeze(0)
+            new_W1 = M1 + (1 - alpha) * (W1 - M1) + S1
+            new_W2 = M2 + (1 - alpha) * (W2 - M2) + S2
+        else:
+            new_W1 = (1 - alpha) * W1 + S1
+            new_W2 = (1 - alpha) * W2 + S2
         dt = state.W1.dtype
         new_state = MemoryState(new_W1.to(dt), new_W2.to(dt), S1.to(dt), S2.to(dt), summary.to(state.summary.dtype),
                                 state.updates + 1, False, dict(state.meta))

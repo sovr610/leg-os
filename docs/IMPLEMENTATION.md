@@ -24,6 +24,8 @@ makes no capability claims**.
 | §14 Serving & capacity | `runtime/paged_kv.py`, `runtime/prefix_cache.py`, `runtime/speculative.py`, `runtime/capacity.py` | `tests/runtime/*` |
 | Appendix A pseudocode (ingest / generate / fork) | `runtime/session.py` (`ingest`, `ingest_media`, `generate`, `fork`, `attach_branch`, `replay`) | `tests/runtime/test_session.py`, `tests/runtime/test_media_session.py` |
 | §10 model as planner (valid plans and tool calls) | `runtime/structured.py` (schema-guided decoding), `runtime/planner.py` (`ModelPlanner`, `open_model_session`) | `tests/runtime/test_planner.py` |
+| §11 optimised kernels behind references | `kernels/attention.py` (`attention_flex`), `kernels/moe.py` (`moe_grouped_mm`), `kernels/gdn_fla.py` (fla varlen adapter), `model.set_kernel_mode` | `tests/kernels/test_backends.py` |
+| §12 proxy tournament (step 6) | `train/tournament.py`, `m63 tournament`, `configs/tournament/*.yaml` | `tests/train/test_tournament.py` |
 | §13/§16 release gates, end to end | `eval/release.py`, `eval/agent_security.py`, `m63 release-check` | `tests/eval/test_release.py` (incl. negative tests) |
 | Appendix B verification inventory | `tests/` (organised by test family) | — |
 
@@ -31,6 +33,9 @@ makes no capability claims**.
 
 | Test family | Where |
 |---|---|
+| Boundary lengths 1/63/64/65/2,047/2,048/2,049/32K/max context | `tests/model/test_boundaries.py` (32K at kernel level, marked `slow`) |
+| Float64 finite-difference gradients for every kernel and both mixer layers | `tests/kernels/test_gradcheck.py` |
+| Sampled speculative decoding preserves the target distribution (chi-square + negative control) | `tests/runtime/test_speculative_distribution.py` |
 | Causality (future-suffix replacement, document resets, packed sequences, memory read timing) | `tests/model/test_backbone.py`, `tests/model/test_memory.py`, `tests/model/test_multimodal.py` |
 | GDN equivalence (chunked vs recurrent, odd/even chunks, lengths 1/63/64/65/127/129, gradients) | `tests/kernels/test_gdn_kernels.py`, `tests/model/test_backbone.py` |
 | GQA / memory masks (extra memory KV, RoPE positions, branch rollback) | `tests/kernels/test_moe_memory_attention_kernels.py`, `tests/runtime/test_caches_and_speculative.py` |
@@ -74,14 +79,32 @@ makes no capability claims**.
    when estimating cost, while the audio encoder emits only complete tokens, so a plan can
    exceed the encoded count by at most one audio token per asset — the safe direction for
    the §5 "estimate before encoding, never truncate silently" rule.
-8. **Speculative rollback.** Rejected MTP drafts restore the pre-verification snapshot and
+8. **Maximum context is enforced.** A forward pass that would exceed the largest
+   `context_targets` entry raises `ContextLengthError` naming the §5 options, instead of
+   running past the configured window.
+9. **Precision policy.** Sensitive arithmetic runs in max(FP32, input dtype)
+   (`kernels/precision.py`): BF16/FP16 accumulate in FP32 and FP64 passes through, so
+   float64 gradient checks exercise the real code.
+10. **Memory forgetting target.** The blueprint's rule decays memory toward zero, which
+    erodes the learned `M0` over long sessions; `memory.decay_target: init` decays toward
+    `M0` instead. The default stays `zero`; the tournament decides — but only in
+    `--segmented-memory` mode, because packed training never updates memory (it reads `M0`),
+    so memory ablations are identical there by construction.
+12. **Tournament selection is noise-aware.** TPOT is the median of repeated measurements and
+    Pareto dominance requires a margin beyond tolerance (eval loss: median bootstrap CI
+    half-width; TPOT: 15% relative), so timing jitter cannot crown a winner among
+    equivalent candidates.
+11. **Speculative rollback.** Rejected MTP drafts restore the pre-verification snapshot and
    replay the accepted tokens — exact by construction; production kernels may checkpoint
    per token instead, but must match this reference.
 
 ## Not implemented here (next steps on the build program)
 
-* Megatron-Core distributed training and optimised Triton/CUDA GDN, grouped-GEMM, and
-  memory-update kernels (`train/parallel.py` only validates layouts).
+* Megatron-Core distributed training (`train/parallel.py` only validates layouts) and a fused
+  memory-update kernel. Optional GPU backends exist for attention (FlexAttention), GDN
+  (flash-linear-attention adapter; its layout conversion is tested on CPU, the Triton kernel
+  itself only runs when a GPU and `fla` are present) and MoE (`torch._grouped_mm`); none is
+  benchmarked here.
 * KDA / GDN-2 / Mamba-3 recurrent alternatives for the proxy tournament (the mixer is
   selected by `hybrid_pattern`; add a new kind next to `gdn`).
 * FP8 training, quantised serving, vLLM integration, prefill/decode disaggregation.

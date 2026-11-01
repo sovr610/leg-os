@@ -36,6 +36,8 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
+from .precision import acc_dtype
+
 
 def _check(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, g: torch.Tensor, beta: torch.Tensor) -> None:
     if q.shape != k.shape:
@@ -63,13 +65,14 @@ def gdn_recurrent_reference(
     Dv = v.shape[-1]
     scale = Dk**-0.5 if scale is None else scale
     out_dtype = v.dtype
-    q, k, v = q.float() * scale, k.float(), v.float()
-    g, beta = g.float(), beta.float()
-    S = q.new_zeros(B, H, Dk, Dv) if initial_state is None else initial_state.float().clone()
+    cd = acc_dtype(q, k, v, g, beta)
+    q, k, v = q.to(cd) * scale, k.to(cd), v.to(cd)
+    g, beta = g.to(cd), beta.to(cd)
+    S = q.new_zeros(B, H, Dk, Dv) if initial_state is None else initial_state.to(cd).clone()
     outs = []
     for t in range(T):
         if reset is not None:
-            keep = (~reset[:, t]).float().view(B, 1, 1, 1)
+            keep = (~reset[:, t]).to(cd).view(B, 1, 1, 1)
             S = S * keep
         S = S * torch.exp(g[:, t]).view(B, H, 1, 1)
         kt, vt, bt = k[:, t], v[:, t], beta[:, t]
@@ -115,8 +118,9 @@ def gdn_chunked(
     Dv = v.shape[-1]
     scale = Dk**-0.5 if scale is None else scale
     out_dtype = v.dtype
+    cd = acc_dtype(q, k, v, g, beta)
     if T == 0:
-        S0 = q.new_zeros(B, H, Dk, Dv, dtype=torch.float32) if initial_state is None else initial_state.float()
+        S0 = q.new_zeros(B, H, Dk, Dv, dtype=cd) if initial_state is None else initial_state.to(cd)
         return v.new_zeros(B, 0, H, Dv), S0
     C = chunk_size
     N = -(-T // C)
@@ -124,8 +128,8 @@ def gdn_chunked(
     if reset is None:
         reset = torch.zeros(B, T, dtype=torch.bool, device=q.device)
 
-    def prep(x: torch.Tensor) -> torch.Tensor:  # [B,T,H,D] -> [B,H,N,C,D] fp32, zero padded
-        x = x.float()
+    def prep(x: torch.Tensor) -> torch.Tensor:  # [B,T,H,D] -> [B,H,N,C,D] in >= fp32, zero padded
+        x = x.to(cd)
         if pad:
             x = F.pad(x, (0, 0, 0, 0, 0, pad))
         return x.view(B, N, C, H, -1).permute(0, 3, 1, 2, 4)
@@ -149,7 +153,7 @@ def gdn_chunked(
 
     kk = kc @ kc.transpose(-1, -2)
     A = (bc.unsqueeze(-1) * gamma_pair * kk).masked_fill(~causal_strict, 0.0)
-    eye = torch.eye(C, device=q.device, dtype=torch.float32)
+    eye = torch.eye(C, device=q.device, dtype=cd)
     L = eye + A
     rhs = torch.cat([(bc * gamma).unsqueeze(-1) * kc, bc.unsqueeze(-1) * vc], dim=-1)
     sol = torch.linalg.solve_triangular(L, rhs, upper=False, unitriangular=True)
@@ -162,7 +166,7 @@ def gdn_chunked(
     k_to_end = decay_to_end.unsqueeze(-1) * kc
     gamma_last = gamma[..., -1]  # [B,H,N]
 
-    S = q.new_zeros(B, H, Dk, Dv, dtype=torch.float32) if initial_state is None else initial_state.float()
+    S = q.new_zeros(B, H, Dk, Dv, dtype=cd) if initial_state is None else initial_state.to(cd)
     outs = []
     for n in range(N):
         U = U_prime[:, :, n] - W[:, :, n] @ S
