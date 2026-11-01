@@ -98,6 +98,12 @@ makes no capability claims**.
    replay the accepted tokens — exact by construction; production kernels may checkpoint
    per token instead, but must match this reference.
 
+## Design review
+
+[`IMPROVEMENTS.md`](IMPROVEMENTS.md) is a researched review of the architecture, data, training
+cost, and serving cost, with a prioritised roadmap. Its §9 lists concrete corrections to this
+repository; they are not yet applied.
+
 ## Not implemented here (next steps on the build program)
 
 * Megatron-Core distributed training (`train/parallel.py` only validates layouts) and a fused
