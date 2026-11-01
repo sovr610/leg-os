@@ -18,8 +18,10 @@ from typing import Any, Mapping
 from .common import content_hash
 
 GDN = "gdn"
+KDA = "kda"  # Kimi Delta Attention: channel-wise-gated GDN (tournament alternative)
 GATED_GQA = "gated_gqa"
-MIXER_KINDS = (GDN, GATED_GQA)
+MIXER_KINDS = (GDN, KDA, GATED_GQA)
+RECURRENT_KINDS = (GDN, KDA)  # constant-size state; share the ``gdn`` shape section
 
 
 class ConfigError(ValueError):
@@ -52,6 +54,7 @@ class GDNConfig:
     decode_mode: str = "recurrent"
     decay_gate_dtype: str = "float32"
     output_gate: bool = True
+    kda_low_rank: int = 0  # KDA forget/output-gate projection rank; 0 = key_dim (Kimi Linear)
 
 
 @dataclass(frozen=True)
@@ -101,10 +104,11 @@ class MemoryConfig:
 @dataclass(frozen=True)
 class MTPConfig:
     enabled: bool = True
-    layers: int = 1
+    layers: int = 1  # trained sequential MTP depth D (DeepSeek-V3 uses D = 1)
     mixer: str = "standard_gqa"
     dense_ffn_hidden: int = 11008
-    draft_tokens: int = 2
+    draft_tokens: int = 1  # <= layers: each draft uses the depth trained for it (blueprint §11 says 2; see IMPLEMENTATION.md)
+    share_weights: bool = False  # one module reused at every depth (parameters shared, compute per depth)
 
 
 @dataclass(frozen=True)
@@ -136,6 +140,10 @@ class MultimodalConfig:
     audio_chunk_tokens: int = 25  # chunk-aware attention window (4 s at 6.25 tok/s)
     ctc_vocab: int = 257  # byte-level CTC targets + blank
     explicit_timestamps: bool = True
+    # AV interleaving (§5). The blueprint: 4-s windows, <|av_chunk|> + <|ts|> carrying a learned time embedding.
+    av_chunk_ms: int = 0  # AV window length; 0 = the audio encoder chunk (4 s). 2000 needs audio_attention: causal
+    timestamp_mode: str = "embedding"  # "embedding" (blueprint) | "text": <|av_chunk|> + the window start in seconds as text
+    audio_attention: str = "chunk"  # "chunk": block-causal over current + previous chunk | "causal": token-causal, 2-chunk lookback
 
 
 @dataclass(frozen=True)
@@ -315,6 +323,8 @@ def validate(cfg: M63Config) -> None:
         errs.append("gdn.inner_width must equal gdn.heads * gdn.value_dim")
     if g.key_dim != g.value_dim:
         errs.append("gdn.key_dim must equal gdn.value_dim (shared conv/projection width)")
+    if g.kda_low_rank < 0:
+        errs.append("gdn.kda_low_rank must be >= 0 (0 = key_dim)")
     if g.decay_gate_dtype != "float32":
         errs.append("gdn.decay_gate_dtype must be float32 (§4: cumulative decay in FP32)")
     if a.query_heads % a.kv_heads != 0:
@@ -344,6 +354,11 @@ def validate(cfg: M63Config) -> None:
             errs.append("memory.untrusted_persistent_writes must be false (§6 memory governance)")
     if cfg.mtp.enabled and cfg.mtp.mixer != "standard_gqa":
         errs.append("mtp.mixer must be standard_gqa")
+    if cfg.mtp.enabled and cfg.mtp.layers < 1:
+        errs.append("mtp.layers (trained depth) must be >= 1")
+    if cfg.mtp.enabled and not 0 <= cfg.mtp.draft_tokens <= cfg.mtp.layers:
+        errs.append(f"mtp.draft_tokens must be in [0, mtp.layers={cfg.mtp.layers}]: a depth-{cfg.mtp.layers} MTP "
+                    "was never trained to draft further (raise mtp.layers, optionally with share_weights)")
     mm = cfg.multimodal
     if mm.enabled:
         frames_per_sec = 1000.0 / mm.hop_ms
@@ -352,6 +367,18 @@ def validate(cfg: M63Config) -> None:
             errs.append(f"audio_tokens_per_second {mm.audio_tokens_per_second} != derived {derived}")
         if mm.audio_downsample & (mm.audio_downsample - 1):
             errs.append("audio_downsample must be a power of two")
+        if mm.timestamp_mode not in ("embedding", "text"):
+            errs.append("multimodal.timestamp_mode must be 'embedding' or 'text'")
+        if mm.audio_attention not in ("chunk", "causal"):
+            errs.append("multimodal.audio_attention must be 'chunk' or 'causal'")
+        if mm.av_chunk_ms < 0:
+            errs.append("multimodal.av_chunk_ms must be >= 0 (0 = the audio encoder chunk)")
+        elif mm.av_chunk_ms and mm.audio_attention == "chunk":
+            chunk_ms = mm.audio_chunk_tokens / mm.audio_tokens_per_second * 1000.0
+            ratio = mm.av_chunk_ms / chunk_ms
+            if abs(ratio - round(ratio)) > 1e-6 or round(ratio) < 1:
+                errs.append(f"multimodal.av_chunk_ms={mm.av_chunk_ms} is not a multiple of the {chunk_ms:g} ms audio chunk: "
+                            "chunked audio attention would see later windows; set audio_attention: causal")
     if errs:
         raise ConfigError("; ".join(errs))
 

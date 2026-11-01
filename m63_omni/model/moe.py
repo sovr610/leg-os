@@ -53,7 +53,7 @@ class Router(nn.Module):
         s = torch.sigmoid(logits)
         sel = s + self.bias
         n_nodes = cfg.routed_experts // cfg.experts_per_node
-        if n_nodes > cfg.max_nodes_per_token:
+        if self.node_limited:
             per_node = sel.view(-1, n_nodes, cfg.experts_per_node)
             m = min(cfg.experts_per_node, max(1, math.ceil(cfg.top_k / cfg.max_nodes_per_token)))
             node_score = per_node.topk(m, dim=-1).values.sum(-1)  # [N, nodes]
@@ -64,6 +64,19 @@ class Router(nn.Module):
         w = s.gather(-1, idx)
         w = w / w.sum(-1, keepdim=True).clamp(min=1e-9)
         return idx, w, s, logits
+
+    @property
+    def node_limited(self) -> bool:
+        """Whether node-limited routing can change any selection.
+
+        With ``top_k <= max_nodes_per_token`` the top-k experts occupy at most
+        ``top_k`` nodes, and each of those nodes scores at least as high as any
+        node without a top-k expert, so the restriction never binds (the
+        reference top-2 / 2-node setting). It is skipped then, which also
+        avoids tie-breaking differences against the unrestricted top-k.
+        """
+        cfg = self.cfg
+        return cfg.routed_experts // cfg.experts_per_node > cfg.max_nodes_per_token and cfg.top_k > cfg.max_nodes_per_token
 
     @torch.no_grad()
     def update_bias(self, counts: torch.Tensor) -> None:

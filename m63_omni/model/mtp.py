@@ -1,11 +1,14 @@
-"""Optional multi-token-prediction (MTP) module (blueprint §3, §14).
+"""Optional multi-token-prediction (MTP) modules (blueprint §3, §14).
 
-One standard GQA layer plus one dense SwiGLU FFN (width 11,008). Input fuses the
-backbone's final hidden state at position ``t`` with the embedding of token
-``t+1`` (parameter-free sum of two RMS-normalised streams), and the module
-predicts token ``t+2`` through the tied LM head. Applied recursively it drafts
-``draft_tokens`` tokens; the target model always verifies them, and a
-target-only path is always retained.
+Each depth is one standard GQA layer plus one dense SwiGLU FFN (width 11,008).
+Depths are *sequential* (DeepSeek-V3): depth ``j`` fuses depth ``j-1``'s output
+at position ``t`` (depth 0 is the backbone's final hidden state) with the
+embedding of token ``t+j`` — a parameter-free sum of two RMS-normalised streams
+— and predicts token ``t+j+1`` through the tied LM head. ``mtp.layers`` sets the
+trained depth; ``mtp.share_weights`` reuses one module at every depth (the
+parameters are shared, the compute is not). Speculative decoding drafts at most
+``mtp.layers`` tokens, each with the depth that was trained for it; the target
+model always verifies them, and a target-only path is always retained.
 """
 
 from __future__ import annotations
@@ -41,3 +44,18 @@ class MTPModule(nn.Module):
         x = x + a
         x = x + self.ffn(self.ffn_norm(x))
         return self.out_norm(x), new_state
+
+
+class MTPStack(nn.Module):
+    """``mtp.layers`` sequential MTP depths (one shared module when ``mtp.share_weights``)."""
+
+    def __init__(self, cfg: M63Config) -> None:
+        super().__init__()
+        self.depth = cfg.mtp.layers
+        self.depths = nn.ModuleList([MTPModule(cfg) for _ in range(1 if cfg.mtp.share_weights else self.depth)])
+
+    def at(self, j: int) -> MTPModule:
+        """The module for depth ``j`` (1-based)."""
+        if not 1 <= j <= self.depth:
+            raise ValueError(f"MTP depth {j} outside 1..{self.depth} (the trained depth)")
+        return self.depths[0 if len(self.depths) == 1 else j - 1]

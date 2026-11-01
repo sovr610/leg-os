@@ -79,7 +79,8 @@ def single_thread():
 def test_end_to_end_sampled_speculative_matches_target_only(single_thread):
     """Distribution of the 2nd and 3rd generated tokens: target-only vs MTP speculative (homogeneity)."""
     torch.manual_seed(0)
-    cfg = tiny(model={"vocab_size": 80, "special_tokens": 64}, multimodal={"enabled": False})
+    cfg = tiny(model={"vocab_size": 80, "special_tokens": 64}, multimodal={"enabled": False},
+               mtp={"layers": 2, "draft_tokens": 2})
     m = M63Omni(cfg).eval()
     with torch.no_grad():  # sharpen the output distribution so the test has power over 80 classes
         m.embed.weight.mul_(8.0)

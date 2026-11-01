@@ -89,10 +89,14 @@
 
 **Training compute.** The blueprint's 1.85e23 FLOPs at 250 TFLOP/s (33.5 days on 256 GPUs) leaves
 out two terms:
-- the MTP module plus its share of the 131K-vocab head (**+13.6%**) [D];
-- long-context attention across Stages A–D (**~+15%**) [D].
+- the MTP module plus its share of the 131K-vocab head (**+13.0%**) [D];
+- long-context attention across Stages A–D (**~+18%**, an upper bound: dense causal masking at
+  each stage's mean packed length) [D];
+- smaller terms: the vision tower over patches (~+4.7% at 4 patches per visual position, if trained)
+  and the chunked GDN/KDA arithmetic (+0.7%) [D].
 
-A re-derived total is **≈2.1e23 FLOPs** [D]. The 250 TFLOP/s figure also names no GPU. Comparable
+A re-derived total is **≈2.1e23 FLOPs** (2.14e23) [D]; `m63 capacity` prints the breakdown from
+`runtime.capacity.training_compute`. The 250 TFLOP/s figure also names no GPU. Comparable
 5B-active MoEs measure **~150–210 TFLOP/s/GPU on H100 BF16**, even with ideal routing [GH,
 Megatron-Bridge performance tables].
 
@@ -176,7 +180,7 @@ matched shared capacity, keeps total and active parameters identical (62.50B / 4
 | DeepStack (ViT layers 8/16/24 → first LLM layers) | Qwen3-VL / Qwen3-Omni [GH] | More detail, no extra positions | **Ablate** |
 | **Richer training rates**: video ~32 pos/s, inference 8–16 | Apollo: 8–32 tokens/frame and fps-consistent sampling [S]. Qwen3-VL uses 128–768 tokens per 2-frame group [GH]. | Unique video hours 18.75M → 4.5M; ~1.1M at ≤4 epochs [D] | **Adopt** (multi-rate resampler) |
 | Shot-aware sampling (TransNetV2 keyframe per shot + fps floor) | 0.5 fps misses sub-2-second shots | Editing-relevant coverage | **Adopt** |
-| **Interleaved text timestamps** as the AV chunk markers | Qwen3-VL replaced T-RoPE with text stamps [GH]. TimeLens: text timestamps beat positional methods [S]. | Works in the recurrent layers. A 2-hour session goes 114,200 → 121,400 positions, still under 128K [D]. | **Adopt** |
+| **Interleaved text timestamps** as the AV chunk markers | Qwen3-VL replaced T-RoPE with text stamps [GH]. TimeLens: text timestamps beat positional methods [S]. | Works in the recurrent layers. With 2-s windows a 2-hour session goes 114,200 → 120,900 positions, still under 128K [D]. | **Adopt** |
 | 2-second AV chunks (from 4) | Qwen2.5-Omni uses 2 s [GH]; the blueprint table says "2–4 s" | Finer audio-video sync | **Adopt** |
 | Audio trained at 12.5 Hz, inferred at 6.25 Hz via a learned 2× pool | Qwen moved 25 → 12.5 → 6.25 Hz, but its 6.25 Hz encoder saw ~40M hours [S/GH]. Cleared speech is ~2.5–3M h. | Audio hours 21.8M → 10.9M; ~2.7M at ≤4 epochs, about equal to supply [D] | **Ablate** |
 | Audio encoder init from Whisper (MIT) | Ming, Ola, Baichuan, and Kimi use Whisper encoders [GH] | Avoids an encoder trained from scratch on limited hours | **Ablate** (shape change; training-data provenance [U]) |
@@ -281,7 +285,7 @@ The unique hours needed, combined [D]:
 | Prefix caching | "Align" mode: the memory-segment length (2,048) must be a multiple of the engine block size; recurrent-state checkpoints at block boundaries [GH] |
 | KV tiers | HBM → DRAM → Mooncake / SSD, with session-affine, KV-aware routing (Mooncake: 3.8× throughput, hit rate 1.7% → 92.2% [GH]) |
 | Speculation | **MTP k=1, load-gated.** DeepSeek-V3 MTP: 60 → 82 tok/s/rank at low batch, only +14% at 128 requests/rank [GH]. Apply the grammar to drafts too: acceptance length 2.33 → 2.55 [GH]. Speculation on JSON is fine (acceptance length 2.5–2.9 [GH]). |
-| Structured output | **Engine grammar** (llguidance: <50 µs average mask [GH]; XGrammar). Keep `runtime/structured.py` as the correctness oracle. It measured **0.85–0.94 s per uncached mask** at a 131K vocabulary [M], roughly 10⁴× slower. |
+| Structured output | **Engine grammar** (llguidance: <50 µs average mask [GH]; XGrammar). Keep `runtime/structured.py` as the correctness oracle. It measured **0.85–0.94 s per uncached mask** at a 131K vocabulary [M]; a class-trie + lazy-DFA rewrite brought that to **~16 ms** [M], still ~300× slower than an engine grammar. |
 | Neural memory | Off for v1 serving (no engine support) |
 
 **Capacity, 128K sessions** (KV + recurrent + checkpoints ≈ 3.9 GB per session in FP8) [D]:
@@ -296,10 +300,14 @@ The unique hours needed, combined [D]:
 
 ## 9. Corrections to this repository and the blueprint
 
-These came out of the research. Each is small and concrete.
+These came out of the research. Each is small and concrete. **Status:** items 1–4, the
+structured-decoder half of 9, and item 8 are implemented; the low-risk defaults from §1 (KDA,
+`kv_heads: 4`, memory off, text timestamps, 2-s AV windows) are selectable in
+`configs/recommended.yaml` and as separate proxy-tournament variants. `configs/full.yaml` stays the
+blueprint baseline. See the table at the end of this section.
 
 1. **The training FLOP model** in `runtime/capacity.py` and blueprint §14:
-   - omits MTP (+13.6%) and long-context attention (+15%);
+   - omits MTP (+13.0%) and long-context attention (~+18%);
    - double-counts inefficiency, since "sustained TFLOP/s" already includes it;
    - names no hardware.
 
@@ -328,6 +336,16 @@ These came out of the research. Each is small and concrete.
    Both are fine as references; a serving port (vLLM/SGLang) is a prerequisite, not an option.
 10. **The proxy tournament** must score multi-hop reasoning and in-context learning, not only RULER.
     That is the lesson from MiniMax M2.
+
+| Item | Where it landed |
+|---|---|
+| 1. FLOP model | `capacity.training_compute` (6·N·D with the head, MTP per depth, attention per stage, recurrent, encoders) and named `HARDWARE` profiles without a stacked overhead; `m63 capacity`, model card. The blueprint's `training_flops` stays for the §14 table. |
+| 2. Session footprint | `capacity.session_footprint(kv_dtype_bytes=, state_dtype_bytes=, memory_dtype_bytes=, include_mtp=, state_checkpoints=, page_tokens=)` rejects FP8 recurrent/memory state; `capacity.serving_footprint` is the §8 view (3.84 GB per 128K session). |
+| 3. MTP drafting | Sequential multi-depth MTP (`mtp.layers`, `mtp.share_weights`), one depth per draft, loss averaged over depths; `draft_tokens ≤ layers` is validated and the default is 1. |
+| 4. Node limit | `Router.node_limited` skips the restriction when `top_k ≤ max_nodes_per_token`, where it can never bind. |
+| 8. Chunk length | `multimodal.av_chunk_ms` (2000 in `recommended.yaml`) with `audio_attention: causal` and end-time audio assignment; `multimodal.timestamp_mode: text`. |
+| 9. Structured masks | Class trie + lazy DFA + pruning for regex masks; digit-only integer masks; brute-force equivalence tests. The O(L) KV append remains (reference only). |
+| §1 defaults | `kda` mixer kind (`kernels/kda.py`, `model/kda.py`); `configs/recommended.yaml`; tournament variants `kda`, `kv_heads_half`, `memory_off`, `text_timestamps`, `av_chunk_2s`, `recommended_defaults`. The text-only tournament reports multimodal-only variants as skipped rather than ranking ties. |
 
 ---
 

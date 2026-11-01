@@ -17,7 +17,7 @@ from typing import Optional
 
 import torch
 
-from ..model.cache import HybridCache, KVLayerState, resolve_stream
+from ..model.cache import HybridCache, resolve_stream
 from ..model.m63 import M63Omni
 from ..model.memory import MemoryState
 
@@ -46,14 +46,25 @@ def _sample(logits: torch.Tensor, temperature: float, gen: Optional[torch.Genera
 
 @dataclass
 class MTPCache:
-    """MTP attention KV for *committed* positions only (both their hidden state and next token are final).
+    """Per-depth MTP attention KV and outputs for *committed* positions only.
 
-    Speculative positions are computed functionally on top of it and never stored,
-    so a rejected draft needs no MTP rollback.
+    Depth ``j`` (1-based) at position ``i`` is committed once its inputs are final:
+    depth ``j-1``'s output at ``i`` and token ``x_{i+j}``. With ``L`` committed
+    transcript positions plus the target's next token ``x_L``, depth ``j`` commits
+    positions ``< L - j + 1``; its last ``j - 1`` positions depend on drafts and
+    are computed functionally on top of the cache, never stored, so a rejected
+    draft needs no MTP rollback.
     """
 
-    state: Optional[KVLayerState] = None
-    n: int = 0
+    states: list = field(default_factory=list)  # per depth: Optional[KVLayerState]
+    hidden: list = field(default_factory=list)  # per depth: committed outputs [n_j, d] (input to depth j+1)
+    n: list = field(default_factory=list)  # per depth: committed positions
+
+    def ensure(self, depth: int) -> None:
+        while len(self.n) < depth:
+            self.states.append(None)
+            self.hidden.append(None)
+            self.n.append(0)
 
 
 def _stream_at(n: int, length: int, device: torch.device):
@@ -64,29 +75,52 @@ def _stream_at(n: int, length: int, device: torch.device):
     return resolve_stream(1, length, device, pseudo)
 
 
-def _draft_cached(model: M63Omni, mc: MTPCache, new_hidden: torch.Tensor, new_next: list[int], k: int,
-                  temperature: float, gen: Optional[torch.Generator]) -> tuple[list[int], list[Optional[torch.Tensor]]]:
-    """Commit ``new_hidden`` positions to the MTP cache, then draft ``k`` tokens recursively.
+def _emit(model: M63Omni, h: torch.Tensor, temperature: float, gen: Optional[torch.Generator]):
+    logits = model.logits(h)
+    tok = _sample(logits, temperature, gen)
+    return tok, (torch.softmax(logits.float() / temperature, -1) if temperature > 0 else None)
 
-    Equivalent to :func:`_draft` (full recompute) but O(new positions) per step.
+
+def _draft_cached(model: M63Omni, mc: MTPCache, hidden: torch.Tensor, ids: list[int], k: int, temperature: float,
+                  gen: Optional[torch.Generator]) -> tuple[list[int], list[Optional[torch.Tensor]], int]:
+    """Draft ``k`` tokens, one per MTP depth, reusing committed MTP state.
+
+    ``hidden``: [L, d] target hidden_raw for the committed positions; ``ids``: the
+    L+1 transcript tokens (the last is the target's chosen next token). Equal to
+    :func:`_draft` (full recompute); returns ``(drafts, draft probs, MTP positions computed)``.
     """
-    dev = new_hidden.device
-    nxt = torch.tensor([new_next], device=dev)
-    mh, mc.state = model.mtp(new_hidden.unsqueeze(0), model.embed(nxt), _stream_at(mc.n, new_hidden.shape[0], dev), mc.state)
-    mc.n += new_hidden.shape[0]
-    h_prev, state, n = mh[:, -1:], mc.state, mc.n
+    L, dev = hidden.shape[0], hidden.device
+    mc.ensure(k)
+    ext = list(ids)
     drafts: list[int] = []
     qs: list[Optional[torch.Tensor]] = []
-    for j in range(k):
-        logits = model.logits(h_prev[:, -1])[0]
-        tok = _sample(logits, temperature, gen)
-        drafts.append(int(tok))
-        qs.append(torch.softmax(logits.float() / temperature, -1) if temperature > 0 else None)
-        if j == k - 1:
-            break
-        h_prev, state = model.mtp(h_prev, model.embed(tok.view(1, 1)), _stream_at(n, 1, dev), state)
-        n += 1
-    return drafts, qs
+    spec_prev = hidden.new_zeros(0, hidden.shape[1])  # depth j-1 outputs at its speculative positions
+    computed = 0
+    for j in range(1, k + 1):
+        mod = model.mtp.at(j)
+        prev = hidden if j == 1 else mc.hidden[j - 2]
+        c, n = L - j + 1, mc.n[j - 1]  # depth j commits positions [0, c)
+        if c > n:
+            tok = torch.tensor([ext[n + j : c + j]], device=dev)
+            out, mc.states[j - 1] = mod(prev[n:c].unsqueeze(0), model.embed(tok), _stream_at(n, c - n, dev),
+                                        mc.states[j - 1])
+            mc.hidden[j - 1] = out[0] if mc.hidden[j - 1] is None else torch.cat([mc.hidden[j - 1], out[0]], 0)
+            mc.n[j - 1] = c
+            computed += c - n
+        if j == 1:
+            spec, h_last = spec_prev, mc.hidden[0][-1]
+        else:  # positions c..L-1: depth j-1 committed at c, speculative after
+            spec_in = torch.cat([prev[c:], spec_prev], 0)
+            tok = torch.tensor([ext[c + j : L + j]], device=dev)
+            out, _ = mod(spec_in.unsqueeze(0), model.embed(tok), _stream_at(c, j - 1, dev), mc.states[j - 1])
+            spec, h_last = out[0], out[0, -1]
+            computed += j - 1
+        t, q = _emit(model, h_last, temperature, gen)
+        drafts.append(int(t))
+        qs.append(q)
+        ext.append(int(t))
+        spec_prev = spec
+    return drafts, qs, computed
 
 
 @torch.no_grad()
@@ -113,6 +147,8 @@ def generate(
         raise ValueError("reference speculative decoder supports batch size 1")
     if draft_tokens and model.mtp is None:
         raise ValueError("model has no MTP module")
+    if model.mtp is not None and draft_tokens > model.mtp.depth:
+        raise ValueError(f"draft_tokens={draft_tokens} exceeds the trained MTP depth {model.mtp.depth}")
     frozen = None
     if memory is not None:
         frozen = {i: MemoryState(**{**s.__dict__, "frozen": True}) for i, s in memory.items()}
@@ -139,15 +175,16 @@ def generate(
             hist_ids.append(int(next_tok))
             break
         k = min(draft_tokens, max_new_tokens - len(produced))
-        if use_mtp_cache:
-            H = torch.cat(hist_h, 0)
-            new_next = hist_ids[mtp_cache.n + 1 :] + [int(next_tok)]
-            stats.mtp_positions += (H.shape[0] - mtp_cache.n) + max(k - 1, 0)
-            drafts, q_probs = _draft_cached(model, mtp_cache, H[mtp_cache.n :], new_next, k, temperature, generator)
+        H = torch.cat(hist_h, 0)
+        if k == 0:
+            drafts, q_probs = [], []
+        elif use_mtp_cache:
+            drafts, q_probs, computed = _draft_cached(model, mtp_cache, H, hist_ids + [int(next_tok)], k, temperature,
+                                                      generator)
+            stats.mtp_positions += computed
         else:
-            L = sum(h.shape[0] for h in hist_h)
-            stats.mtp_positions += sum(L + j for j in range(k))
-            drafts, q_probs = _draft(model, torch.cat(hist_h, 0), hist_ids + [int(next_tok)], k, temperature, generator)
+            stats.mtp_positions += H.shape[0] * k
+            drafts, q_probs = _draft(model, H, hist_ids + [int(next_tok)], k, temperature, generator)
         stats.drafted += len(drafts)
         snapshot = cache.clone()
         block = torch.tensor([[int(next_tok)] + drafts], device=prompt_ids.device)
@@ -181,24 +218,24 @@ def generate(
 
 def _draft(model: M63Omni, hidden: torch.Tensor, ids: list[int], k: int, temperature: float,
            gen: Optional[torch.Generator]) -> tuple[list[int], list[Optional[torch.Tensor]]]:
-    """Recursive MTP drafting. ``hidden``: [L, d] target hidden_raw for positions 0..L-1;
-    ``ids``: L+1 tokens (the last is the target's chosen next token)."""
+    """Reference drafter: recompute every MTP depth over the whole transcript.
+
+    ``hidden``: [L, d] target hidden_raw for positions 0..L-1; ``ids``: L+1 tokens
+    (the last is the target's chosen next token). Draft ``j`` comes from depth
+    ``j`` at the last position, which fuses depth ``j-1``'s output with token
+    ``x_{L-1+j}`` (the target's token for ``j = 1``, draft ``j-1`` after that).
+    """
     drafts: list[int] = []
     qs: list[Optional[torch.Tensor]] = []
-    if k == 0:
-        return drafts, qs
-    h = hidden.unsqueeze(0)
-    nxt = torch.tensor([ids[1:]], device=hidden.device)
-    for _ in range(k):
-        L = h.shape[1]
-        idx = resolve_stream(1, L, h.device)
-        mh, _ = model.mtp(h, model.embed(nxt), idx)
-        logits = model.logits(mh[:, -1])[0]
-        tok = _sample(logits, temperature, gen)
-        drafts.append(int(tok))
-        qs.append(torch.softmax(logits.float() / temperature, -1) if temperature > 0 else None)
-        h = torch.cat([h, mh[:, -1:]], dim=1)
-        nxt = torch.cat([nxt, tok.view(1, 1)], dim=1)
+    L, dev = hidden.shape[0], hidden.device
+    h, ext = hidden.unsqueeze(0), list(ids)
+    for j in range(1, k + 1):
+        tok = torch.tensor([ext[j : L + j]], device=dev)
+        h, _ = model.mtp.at(j)(h, model.embed(tok), resolve_stream(1, L, dev))
+        t, q = _emit(model, h[0, -1], temperature, gen)
+        drafts.append(int(t))
+        qs.append(q)
+        ext.append(int(t))
     return drafts, qs
 
 

@@ -166,3 +166,65 @@ def test_runtime_session_follows_control_plane_branches(lm, tok):
     fresh = Session(lm, "tenant-a", "edit-2", event_log=rt.log, branch_id="alt", artifact_store=cp.store)
     fresh.replay()
     torch.testing.assert_close(fresh.next_logits(), rt.next_logits(), atol=1e-5, rtol=1e-5)
+
+
+class _SynthTok:
+    """A stub tokenizer with a large synthetic vocabulary (for mask equivalence and timing)."""
+
+    def __init__(self, n: int, seed: int = 0) -> None:
+        rng = random.Random(seed)
+        alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-/@. :é\"\\{}"
+        self.vocab_size = n
+        self.texts = [chr(32 + i % 95) for i in range(95)]
+        self.texts += ["".join(rng.choice(alphabet) for _ in range(rng.randint(1, 9))) for _ in range(n - 95 - 16)]
+        self.texts += [None] * 16
+
+    def is_special(self, i: int) -> bool:
+        return self.texts[i] is None
+
+    def token_bytes(self, i: int) -> bytes:
+        return self.texts[i].encode()
+
+
+PATTERNS = [ID_PATTERN, HASH_PATTERN, TOOL_REF_PATTERN, "^[a-z]{2}(?:-[A-Z]{2})?$", "^(?:trim|split)_[0-9]+$"]
+
+
+@pytest.mark.parametrize("pattern", PATTERNS)
+def test_trie_masks_equal_brute_force(pattern):
+    dec = SchemaDecoder(None, _SynthTok(6000))
+    c = RegexConstraint(pattern, min_len=1, max_len=40)
+    prefixes = [""]
+    rng = random.Random(1)
+    for _ in range(6):  # grow viable prefixes by sampling allowed tokens
+        cur = prefixes[-1]
+        allowed = dec._allowed(c, cur).nonzero().flatten().tolist()
+        if not allowed:
+            break
+        prefixes.append(cur + dec.token_text[rng.choice(allowed)])
+    for cur in prefixes:
+        got = dec._allowed(c, cur)
+        want = torch.tensor([t is not None and dec._clean[i].item() and c.viable(cur + t)
+                             for i, t in enumerate(dec.token_text)])
+        assert torch.equal(got, want), (pattern, cur)
+
+
+@pytest.mark.parametrize("lo,hi,cur", [(8, 96, ""), (8, 96, "1"), (0, 7, ""), (100, 250, "2"), (5, 10**6, "")])
+def test_integer_masks_equal_brute_force(lo, hi, cur):
+    dec = SchemaDecoder(None, _SynthTok(4000))
+    c = IntegerConstraint(lo, hi)
+    want = torch.tensor([t is not None and dec._clean[i].item() and c.viable(cur + t) for i, t in enumerate(dec.token_text)])
+    assert torch.equal(dec._allowed(c, cur), want)
+
+
+def test_regex_mask_is_fast_at_full_vocabulary_size():
+    """131,072 tokens: an uncached mask was ~0.9 s with the per-token loop; the class trie is far faster."""
+    import time
+
+    dec = SchemaDecoder(None, _SynthTok(131072))
+    c = RegexConstraint(TOOL_REF_PATTERN, min_len=1, max_len=64)
+    dec._allowed(c, "")  # builds the pattern's trie once
+    t0 = time.perf_counter()
+    for cur in ("t", "timeline", "timeline.apply", "timeline.apply_edit@"):
+        dec._allowed(c, cur)
+    per_mask = (time.perf_counter() - t0) / 4
+    assert per_mask < 0.25, per_mask

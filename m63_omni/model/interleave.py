@@ -2,26 +2,34 @@
 
 All modalities map into the residual stream annotated with modality IDs, asset
 IDs, trust labels, and explicit timestamps. Audio and video are interleaved in
-timestamp order per AV window (default 4 s)::
+timestamp order per AV window (``multimodal.av_chunk_ms``; default the 4-s audio
+chunk)::
 
     <|video|> ( <|av_chunk|> <|ts|> [video tokens of window w] [audio tokens of window w] )* <|/video|>
 
 which costs exactly two marker positions per window (§5's 3,600 markers for a
 two-hour session). ``<|ts|>`` carries a learned time embedding of the window
-start. Media positions hold ``<|media|>`` placeholder IDs whose embeddings are
-replaced by encoder outputs. Raw binary assets never enter the stream — only
-encoder representations plus typed references (asset IDs, content hashes).
+start. With ``multimodal.timestamp_mode: text`` the window start is written as
+text instead — ``<|av_chunk|> 12`` (seconds) — so the recurrent layers, which
+never see RoPE or time embeddings, read time the same way as any other token.
+Audio tokens join the window that contains their *end* time, the last instant
+of audio they depend on, so any window length keeps earlier windows invariant to
+later media. Media positions hold ``<|media|>`` placeholder IDs whose
+embeddings are replaced by encoder outputs. Raw binary assets never enter the
+stream — only encoder representations plus typed references (asset IDs,
+content hashes).
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Optional, Sequence, Union
+from typing import Callable, Optional, Sequence, Union
 
 import torch
 
 from ..common import Modality, Trust, content_hash
+from ..data.media import timestamp_text
 from .m63 import M63Omni
 
 NO_TIME = -1
@@ -48,7 +56,7 @@ class AVPart:
     frame_times_ms: Optional[torch.Tensor] = None  # [F]
     audio: Optional[torch.Tensor] = None  # [S] at the configured sample rate
     tokens_per_frame: int = 16
-    window_ms: Optional[int] = None  # default: the audio encoder's chunk duration (4 s in the reference)
+    window_ms: Optional[int] = None  # default: multimodal.av_chunk_ms, else the audio encoder's chunk (4 s)
     high_fidelity_audio: bool = False
     trust: Trust = Trust.USER
 
@@ -95,6 +103,7 @@ class _Builder:
         self.embeds: list[torch.Tensor] = []  # [n, d] runs
         self.pending_text: list[int] = []
         self.hash_parts: list = []
+        self.text_encoder: Optional[TextEncoder] = None
 
     def _flush_text(self) -> None:
         if self.pending_text:
@@ -129,11 +138,17 @@ class _Builder:
         self.assets.extend([asset] * n)
 
 
-def build_sequence(model: M63Omni, parts: Sequence[Part]) -> MultimodalSequence:
+TextEncoder = Callable[[str], Sequence[int]]
+
+
+def build_sequence(model: M63Omni, parts: Sequence[Part], *, text_encoder: Optional[TextEncoder] = None) -> MultimodalSequence:
+    """Build the interleaved sequence. ``text_encoder`` (e.g. ``tokenizer.encode_ordinary``) spells text
+    timestamps; without one they are written with the raw byte IDs ``0..255`` (tokenizer-independent)."""
     if model.multimodal is None:
         raise ValueError("model was built without the multimodal front end")
     mm = model.multimodal
     b = _Builder(model)
+    b.text_encoder = text_encoder
     ctc: list[torch.Tensor] = []
     for part in parts:
         if isinstance(part, TextPart):
@@ -155,7 +170,8 @@ def build_sequence(model: M63Omni, parts: Sequence[Part]) -> MultimodalSequence:
             raise TypeError(f"unknown part {type(part).__name__}")
     b._flush_text()
     dev = model.embed.weight.device
-    preprocessing = {"patch": mm.cfg.patch_size, "sr": mm.cfg.audio_sample_rate, "hop_ms": mm.cfg.hop_ms}
+    preprocessing = {"patch": mm.cfg.patch_size, "sr": mm.cfg.audio_sample_rate, "hop_ms": mm.cfg.hop_ms,
+                     "timestamps": mm.cfg.timestamp_mode, "audio_attention": mm.cfg.audio_attention}
     return MultimodalSequence(
         input_ids=torch.tensor([b.ids], dtype=torch.long, device=dev),
         inputs_embeds=torch.cat(b.embeds, dim=0).unsqueeze(0),
@@ -175,9 +191,11 @@ def _add_av(b: _Builder, mm, part: AVPart) -> list[torch.Tensor]:
         raise ValueError(f"AV asset {part.asset_id} has neither frames nor audio")
     a_rate = mm.audio.tokens_per_second(part.high_fidelity_audio)
     chunk_ms = cfg.audio_chunk_tokens * (2 if part.high_fidelity_audio else 1) / a_rate * 1000.0
-    window = part.window_ms or int(round(chunk_ms))
-    if has_a and abs(window / chunk_ms - round(window / chunk_ms)) > 1e-6:
-        raise ValueError("AV window must be a multiple of the audio encoder chunk so windows stay causal")
+    window = part.window_ms or cfg.av_chunk_ms or int(round(chunk_ms))
+    ratio = window / chunk_ms
+    if has_a and cfg.audio_attention == "chunk" and (abs(ratio - round(ratio)) > 1e-6 or round(ratio) < 1):
+        raise ValueError("AV window must be a multiple of the audio encoder chunk so windows stay causal "
+                         "(or set multimodal.audio_attention: causal)")
     dur = 0.0
     vfeats = afeats = None
     ctc: list[torch.Tensor] = []
@@ -194,21 +212,25 @@ def _add_av(b: _Builder, mm, part: AVPart) -> list[torch.Tensor]:
         afeats = afeats[0]
         ctc.append(actc[0])
         dur = max(dur, part.audio.shape[-1] / cfg.audio_sample_rate * 1000.0)
-        a_start = a_end - 1000.0 / a_rate
     open_tok, close_tok = ("<|video|>", "<|/video|>") if has_v else ("<|audio|>", "<|/audio|>")
     b.token(open_tok, part.trust, asset=part.asset_id)
     n_windows = max(1, math.ceil(dur / window))
     for w in range(n_windows):
         lo, hi = w * window, (w + 1) * window
         b.token("<|av_chunk|>", part.trust, asset=part.asset_id, ts=lo)
-        b.token("<|ts|>", part.trust, asset=part.asset_id, ts=lo,
-                extra=mm.time_embedding(torch.tensor([float(lo)], device=b.model.embed.weight.device))[0])
+        if cfg.timestamp_mode == "text":
+            text = timestamp_text(lo)
+            for t in (b.text_encoder(text) if b.text_encoder is not None else text.encode("ascii")):
+                b.token(int(t), part.trust, asset=part.asset_id, ts=lo)
+        else:
+            b.token("<|ts|>", part.trust, asset=part.asset_id, ts=lo,
+                    extra=mm.time_embedding(torch.tensor([float(lo)], device=b.model.embed.weight.device))[0])
         if has_v:
             sel = ((part.frame_times_ms >= lo) & (part.frame_times_ms < hi)).nonzero().squeeze(-1)
             for f in sel.tolist():
                 b.media(vfeats[f], Modality.VIDEO, part.trust, part.asset_id, int(part.frame_times_ms[f]))
-        if has_a:
-            sel = ((a_start >= lo) & (a_start < hi)).nonzero().squeeze(-1)
+        if has_a:  # by end time: a token depends on audio up to its end, never beyond
+            sel = ((a_end > lo) & (a_end <= hi)).nonzero().squeeze(-1)
             if sel.numel():
                 b.media(afeats[sel], Modality.AUDIO, part.trust, part.asset_id, lo)
     b.token(close_tok, part.trust, asset=part.asset_id)

@@ -1,0 +1,8 @@
+# Every low-risk default from docs/IMPROVEMENTS.md together, at proxy shape (see configs/recommended.yaml):
+# KDA, half the KV heads, memory off, single-token MTP drafts, text timestamps, 2-second AV windows.
+extends: ../proxy_1b3.yaml
+model: {hybrid_pattern: [kda, kda, kda, gated_gqa]}
+attention: {kv_heads: 1}
+memory: {enabled: false}
+mtp: {layers: 1, draft_tokens: 1}
+multimodal: {timestamp_mode: text, av_chunk_ms: 2000, audio_attention: causal}

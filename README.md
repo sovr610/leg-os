@@ -20,14 +20,14 @@ tool-orchestration control plane.
 
 | Package | Contents |
 |---|---|
-| `m63_omni/model` | GDN and gated-GQA mixers, dropless MoE with bias-balanced sigmoid router and node-limited routing, Titans-style memory anchors, MTP module, ViT/resampler/temporal/audio encoders, time-aligned AV interleaving, the full `M63Omni` model, code-generated parameter manifest and model card |
-| `m63_omni/kernels` | Naive references + optimised forms: chunkwise-parallel GDN (exact segment-aware resets), attention, sort-based and padded-bmm grouped MoE, closed-form memory gradients |
+| `m63_omni/model` | GDN, KDA (tournament alternative), and gated-GQA mixers, dropless MoE with bias-balanced sigmoid router and node-limited routing, Titans-style memory anchors, sequential multi-depth MTP, ViT/resampler/temporal/audio encoders, time-aligned AV interleaving (embedding or text timestamps, any window length), the full `M63Omni` model, code-generated parameter manifest and model card |
+| `m63_omni/kernels` | Naive references + optimised forms: chunkwise-parallel GDN and KDA (exact segment-aware resets), attention, sort-based and padded-bmm grouped MoE, closed-form memory gradients |
 | `m63_omni/data` | Byte-level BPE + 256 reserved special IDs, exact/near dedup, decontamination with source-event holdouts, PII/quality filters, provenance ledger and immutable manifests, the ten-stage §8 pipeline, token budgeting and AV chunk planning, Stage A–D mixtures, sequence packing |
 | `m63_omni/train` | Combined objective, WSD schedule and batch ramp, reference trainer, exact checkpoint/resume with rolling + milestone tiers, router/numerics/spike monitors, distributed-layout validation |
-| `m63_omni/runtime` | Authoritative hash-chained event log with branches and verified deletion, sessions (governed memory writes, media ingest via the artifact store, frozen-memory generation, CoW forks, branch adoption, replay, TTL reclaim), schema-guided decoding and the `ModelPlanner` that drives the orchestrator, paged KV with copy-on-write, safety-keyed prefix cache, MTP speculative decoding with full state rollback, capacity arithmetic |
+| `m63_omni/runtime` | Authoritative hash-chained event log with branches and verified deletion, sessions (governed memory writes, media ingest via the artifact store, frozen-memory generation, CoW forks, branch adoption, replay, TTL reclaim), schema-guided decoding (class-trie token masks) and the `ModelPlanner` that drives the orchestrator, paged KV with copy-on-write, safety-keyed prefix cache, MTP speculative decoding with full state rollback, capacity and training-compute arithmetic |
 | `m63_omni/agent` | `m63.actions/v1` envelopes, tool registry, deterministic control plane (static validation, permissions, idempotency, sandboxed execution, signed receipts), verifiers, calibrated escalation, orchestration loop |
 | `m63_omni/eval` | Bootstrap CIs and per-cohort reports, scorer self-tests, release gates, long-context probes, efficiency and runtime-security suites |
-| `configs/` | `full.yaml` (the blueprint §11 config), `long_context`, `serving`, `pilot` (10.6B/2.3B active), `proxy_1b3`, `proxy_300m`, and the proxy-tournament variants (1:1, 3:1, 7:1, full-attention control, memory-off, memory decay-to-M0, top-1/top-4, no-shared-expert) |
+| `configs/` | `full.yaml` (the blueprint §11 config), `recommended.yaml` (the researched low-risk defaults: KDA, 4 KV heads, memory off, text timestamps, 2-s AV windows), `long_context`, `serving`, `pilot` (10.6B/2.3B active), `proxy_1b3`, `proxy_300m`, and the proxy-tournament variants (1:1, 3:1, 7:1, full-attention control, KDA, half KV heads, memory-off, memory decay-to-M0, top-1/top-4, no-shared-expert, text timestamps, 2-s AV windows, all recommended defaults) |
 
 ## Quick start
 
@@ -45,6 +45,10 @@ m63 manifest --config configs/full.yaml
 
 ```bash
 m63 capacity
+```
+
+```bash
+m63 manifest --config configs/recommended.yaml
 ```
 
 ```bash
@@ -115,20 +119,24 @@ authorises, executes, signs, and verifies each call.
 
 ## Verified invariants (selected)
 
-* Chunked GDN prefill equals the recurrent decode path (outputs, states, gradients) across
-  chunk boundaries 1/63/64/65/127/129 and in-chunk document resets.
+* Chunked GDN and KDA prefill equal the recurrent decode path (outputs, states, gradients) across
+  chunk boundaries 1/63/64/65/127/129 and in-chunk document resets; KDA with a uniform
+  per-channel decay is exactly GDN.
 * Future-suffix replacement never moves earlier outputs, including through memory reads,
   segmented memory updates, and later AV windows.
 * Packed documents are bit-for-bit isolated; MoE dispatch is dropless and all three kernels agree.
 * Greedy MTP speculative decoding equals target-only decoding, and rejected drafts restore
-  every recurrent, attention, and memory state.
+  every recurrent, attention, and memory state; each draft comes from the MTP depth trained for
+  it, and drafting beyond the trained depth is rejected.
 * Checkpoint resume reproduces the uninterrupted run exactly on CPU.
 * Untrusted content and generation never write persistent memory; cross-tenant reads fail;
   deletion is verifiable (including media blobs); memory snapshots are invalidated by
   model/tokenizer upgrades.
 * Optional backends (FlexAttention block masks, `torch._grouped_mm` MoE, the
   flash-linear-attention GDN adapter, MTP drafting with an incremental cache) match the
-  references; the MTP cache computes ~36x fewer drafter positions on a 300-token prompt.
+  references; the per-depth MTP cache computes each committed position once per depth (6–10x
+  fewer MTP positions than full recompute for 20 tokens after a 300-token prompt, growing with
+  generation length).
 * Every kernel and both mixer layers pass float64 finite-difference gradient checks; the
   Appendix B boundary lengths (through 32K at kernel level) and the maximum context are
   tested; sampled speculative decoding passes chi-square distribution tests.

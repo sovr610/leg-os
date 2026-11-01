@@ -1,0 +1,4 @@
+# AV ablation: 2-second AV windows (blueprint table: "2-4 s"); half an audio chunk, so audio attention
+# becomes token-causal. Multimodal-only: the text tournament reports it as skipped.
+extends: ../proxy_1b3.yaml
+multimodal: {av_chunk_ms: 2000, audio_attention: causal}

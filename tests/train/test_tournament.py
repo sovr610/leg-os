@@ -19,11 +19,17 @@ def test_every_tournament_variant_maps_onto_the_tiny_base():
     cands = build_candidates(tiny(), sorted(VARIANTS.glob("*.yaml")))
     names = {c.name for c in cands}
     assert {"ratio_1to1", "ratio_3to1", "ratio_7to1", "full_attention_control", "memory_off", "top1", "top4",
-            "no_shared_expert", "memory_decay_to_init"} <= names
+            "no_shared_expert", "memory_decay_to_init", "kda", "kv_heads_half", "text_timestamps", "av_chunk_2s",
+            "recommended_defaults"} <= names
     seven = next(c for c in cands if c.name == "ratio_7to1")
     assert seven.cfg.model.hybrid_pattern.count("gdn") == 7 and seven.cfg.memory.anchors == (8,)  # re-fitted
     assert next(c for c in cands if c.name == "memory_decay_to_init").cfg.memory.decay_target == "init"
     assert all(c.cfg.model.hidden_size == 64 for c in cands)  # the base shape is preserved
+    by = {c.name: c.cfg for c in cands}
+    assert by["kda"].layer_kinds().count("kda") == 6 and by["kv_heads_half"].attention.kv_heads == 1  # tiny: 2 -> 1
+    rec = by["recommended_defaults"]
+    assert rec.model.hybrid_pattern[0] == "kda" and not rec.memory.enabled and rec.multimodal.timestamp_mode == "text"
+    assert rec.multimodal.av_chunk_ms == 2000 and rec.multimodal.audio_attention == "causal"
 
 
 def test_matched_positions_metrics_and_pareto(tmp_path):
@@ -82,3 +88,17 @@ def test_segmented_memory_mode_makes_memory_ablations_matter():
     assert seg.results[0].eval_loss != seg.results[1].eval_loss
     assert seg.mode == "segmented memory" and packed.mode == "packed"
     assert "segmented memory training" in seg.to_markdown()
+
+
+def test_multimodal_only_variants_are_skipped_not_ranked():
+    cands = _cands("ratio_3to1", "kda", "text_timestamps", "av_chunk_2s", "recommended_defaults", "memory_decay_to_init")
+    rep = run_tournament(cands, steps=2, batch=2, eval_batches=1)
+    ran = {r.name for r in rep.results}
+    assert ran == {"ratio_3to1", "kda", "recommended_defaults", "memory_decay_to_init"}
+    assert set(rep.skipped) == {"text_timestamps", "av_chunk_2s"} and "media data" in rep.skipped["text_timestamps"]
+    assert rep.notes["recommended_defaults"] == ["multimodal overrides (needs media data)"]
+    assert "segmented-memory" in rep.notes["memory_decay_to_init"][0]
+    md = rep.to_markdown()
+    assert "Skipped" in md and "text_timestamps" in md and "Not exercised" in md
+    with pytest.raises(ValueError, match="skipped"):
+        run_tournament(_cands("text_timestamps"), steps=1)

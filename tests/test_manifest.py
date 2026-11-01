@@ -64,3 +64,15 @@ def test_model_card_generated_from_same_source():
     assert card["parameters"]["total"] == build_manifest(reference()).total
     md = model_card_markdown(reference())
     assert reference().fingerprint() in md and "48 KiB" in md
+
+
+def test_kda_manifest_matches_closed_form_and_card():
+    cfg = reference().replace(model={"hybrid_pattern": ["kda", "kda", "kda", "gated_gqa"]})
+    m = build_manifest(cfg)
+    assert m.resident["kda_mixers"] == analytic_backbone(cfg)["kda_mixers"] and m.resident["gdn_mixers"] == 0
+    assert 0.80 < m.resident["kda_mixers"] / build_manifest(reference()).resident["gdn_mixers"] < 0.90  # low-rank gates
+    assert "kda_mixers" in m.to_markdown() and "kda_mixers" not in build_manifest(reference()).to_markdown()
+    assert "36 KDA" in model_card_markdown(cfg)
+    small = tiny(model={"hybrid_pattern": ["kda", "gdn", "kda", "gated_gqa"]})
+    torch.manual_seed(0)
+    assert build_manifest(small).total == sum(p.numel() for p in M63Omni(small).parameters())

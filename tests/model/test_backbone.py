@@ -96,3 +96,37 @@ def test_loss_and_gradients_finite(cfg, rand_ids):
     (out.lm_loss + out.mtp_loss + out.router_aux_loss()).backward()
     assert all(torch.isfinite(p.grad).all() for p in m.parameters() if p.grad is not None)
     assert m.blocks[0].moe.w_gate.grad.abs().sum() > 0
+
+
+# --------------------------------------------- KDA in the hybrid pattern (tournament alternative)
+@pytest.fixture
+def kda_model():
+    from m63_omni.config import tiny
+    from m63_omni.model.m63 import M63Omni
+
+    torch.manual_seed(0)
+    cfg = tiny(multimodal={"enabled": False}, model={"hybrid_pattern": ["kda", "gdn", "kda", "gated_gqa"]})
+    return cfg, M63Omni(cfg).eval()
+
+
+def test_kda_backbone_prefill_decode_and_isolation(kda_model, rand_ids):
+    from m63_omni.model.kda import KimiDeltaAttention
+
+    cfg, model = kda_model
+    assert sum(isinstance(b.mixer, KimiDeltaAttention) for b in model.blocks) == 4
+    ids = rand_ids(cfg, 2, 29)
+    with torch.no_grad():
+        full = model(ids).logits
+        out = model(ids[:, :13], use_cache=True)
+        cache, pieces = out.cache, [out.logits]
+        for t in range(13, 29):
+            o = model.step(ids[:, t : t + 1], cache)
+            cache = o.cache
+            pieces.append(o.logits)
+        torch.testing.assert_close(torch.cat(pieces, 1), full, atol=1e-5, rtol=1e-5)
+        seg = torch.tensor([[0] * 11 + [1] * 18])
+        pos = torch.tensor([list(range(11)) + list(range(18))])
+        packed = model(ids[:1], segment_ids=seg, position_ids=pos).logits
+        alone = model(ids[:1, 11:]).logits
+    torch.testing.assert_close(packed[:, 11:], alone, atol=1e-5, rtol=1e-5)
+    assert cache.recurrent_bytes() > 0

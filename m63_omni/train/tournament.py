@@ -11,6 +11,13 @@ config. The runner applies each variant's overrides to a chosen *base* (the
 1.3B proxy on real hardware, ``configs/tiny.yaml`` for a CPU smoke run), and
 re-fits memory anchors so they always sit on attention layers of the variant's
 hybrid pattern.
+
+The runner trains on text batches with the multimodal front end disabled, so a
+variant that only changes ``multimodal`` settings (timestamp mode, AV window)
+cannot differ from its base here: it is reported as *skipped* with the reason,
+never ranked as a tie. Mixed variants run, with a note that their multimodal
+overrides were not exercised; score those on media data. Likewise, memory
+overrides other than ``enabled`` only act in ``--segmented-memory`` mode.
 """
 
 from __future__ import annotations
@@ -73,6 +80,8 @@ class TournamentReport:
     results: list[CandidateResult]
     tolerances: dict = field(default_factory=dict)
     mode: str = "packed"  # "packed" (memory reads M0 only) or "segmented memory" (memory updates happen)
+    skipped: dict[str, str] = field(default_factory=dict)  # candidates this runner cannot distinguish, with the reason
+    notes: dict[str, list[str]] = field(default_factory=dict)  # overrides a candidate carried but this run did not exercise
 
     @property
     def winners(self) -> list[str]:
@@ -80,7 +89,8 @@ class TournamentReport:
 
     def to_dict(self) -> dict:
         return {"base_fingerprint": self.base_fingerprint, "budget": self.budget, "mode": self.mode, "winners": self.winners,
-                "tolerances": self.tolerances, "results": [asdict(r) for r in self.results]}
+                "tolerances": self.tolerances, "results": [asdict(r) for r in self.results], "skipped": self.skipped,
+                "notes": self.notes}
 
     def to_markdown(self) -> str:
         lines = [f"# Proxy tournament ({self.budget}-matched, {self.mode} training)", "",
@@ -95,8 +105,14 @@ class TournamentReport:
         tol = self.tolerances
         lines += ["", f"Winners (systems gates passed and Pareto-optimal on eval loss, TPOT, KV bytes): "
                       f"{', '.join(self.winners) or 'none'}",
-                  f"Dominance tolerances: eval loss ±{tol.get('eval_loss', 0):.4f}, TPOT ±{100 * tol.get('tpot_relative', 0):.0f}%.",
-                  "", "Small-scale results select candidates for the pilot; they are not capability claims."]
+                  f"Dominance tolerances: eval loss ±{tol.get('eval_loss', 0):.4f}, TPOT ±{100 * tol.get('tpot_relative', 0):.0f}%."]
+        if self.skipped:
+            lines += ["", "Skipped (not distinguishable by this runner):"]
+            lines += [f"- {name}: {why}" for name, why in sorted(self.skipped.items())]
+        if self.notes:
+            lines += ["", "Not exercised by this run:"]
+            lines += [f"- {name}: {'; '.join(n)}" for name, n in sorted(self.notes.items())]
+        lines += ["", "Small-scale results select candidates for the pilot; they are not capability claims."]
         return "\n".join(lines)
 
 
@@ -124,6 +140,20 @@ def build_candidates(base: M63Config, variants: Sequence[str | Path]) -> list[Ca
         ov = variant_overrides(v)
         merged = fit_anchors(_deep_merge(base.to_dict(), ov))
         out.append(Candidate(Path(v).stem, from_dict(merged), ov))
+    return out
+
+
+#: Sections the text tournament never exercises (the multimodal front end is disabled).
+TEXT_INERT_SECTIONS = frozenset({"multimodal"})
+#: Memory settings that only act when memory updates happen (``segmented_memory=True``).
+PACKED_INERT_MEMORY = frozenset({"decay_target", "max_eta", "max_theta", "max_alpha", "grad_clip", "update_segment_tokens"})
+
+
+def _unexercised(overrides: dict, segmented_memory: bool) -> list[str]:
+    out = [f"{sec} overrides (needs media data)" for sec in sorted(TEXT_INERT_SECTIONS & set(overrides))]
+    mem = overrides.get("memory") or {}
+    if not segmented_memory and isinstance(mem, dict) and PACKED_INERT_MEMORY & set(mem):
+        out.append(f"memory.{', memory.'.join(sorted(PACKED_INERT_MEMORY & set(mem)))} (needs --segmented-memory)")
     return out
 
 
@@ -180,8 +210,21 @@ def run_tournament(
     """
     if budget not in ("positions", "flops"):
         raise ValueError("budget must be 'positions' or 'flops'")
+    skipped: dict[str, str] = {}
+    notes: dict[str, list[str]] = {}
+    runnable = []
+    for c in candidates:
+        if c.overrides and set(c.overrides) <= TEXT_INERT_SECTIONS:
+            skipped[c.name] = ("only changes " + ", ".join(sorted(c.overrides)) + "; this runner trains text with the "
+                               "front end disabled, so it would tie its base. Score it on media data.")
+            continue
+        unexercised = _unexercised(c.overrides, segmented_memory)
+        if unexercised:
+            notes[c.name] = unexercised
+        runnable.append(c)
+    candidates = runnable
     if not candidates:
-        raise ValueError("no candidates")
+        raise ValueError("no candidates" + (f" this runner can distinguish (skipped: {sorted(skipped)})" if skipped else ""))
     vocab = {c.cfg.model.vocab_size for c in candidates}
     if len(vocab) != 1:
         raise ValueError("candidates must share a vocabulary (matched tokenizer)")
@@ -242,7 +285,8 @@ def run_tournament(
         loss_tolerance = halves[len(halves) // 2]
     _pareto(results, loss_tolerance, tpot_rel_tolerance)
     base = candidates[0].cfg
-    rep = TournamentReport(base.fingerprint(), budget, results, mode="segmented memory" if segmented_memory else "packed")
+    rep = TournamentReport(base.fingerprint(), budget, results, mode="segmented memory" if segmented_memory else "packed",
+                           skipped=skipped, notes=notes)
     rep.tolerances = {"eval_loss": loss_tolerance, "tpot_relative": tpot_rel_tolerance}
     return rep
 

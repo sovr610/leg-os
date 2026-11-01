@@ -97,6 +97,23 @@ POLICIES: dict[str, SamplingPolicy] = {p.name: p for p in (LONG_PROXY, HIGH_FIDE
 
 #: Two marker tokens per AV window (§5: "Two marker tokens every four seconds").
 AV_MARKERS: tuple[str, ...] = ("<|av_chunk|>", "<|ts|>")
+TIMESTAMP_MODES = ("embedding", "text")
+
+
+def timestamp_text(ms: int) -> str:
+    """A window start written as seconds for text timestamps: 0 -> "0", 12000 -> "12", 2500 -> "2.5"."""
+    return f"{ms / 1000:.3f}".rstrip("0").rstrip(".")
+
+
+def timestamp_positions(start_ms: int) -> int:
+    """Positions a text timestamp occupies: one per pretokenizer digit group (``\\d{1,3}``) plus the point.
+
+    Exact when the tokenizer holds every 1-3 digit string as a single token (true of
+    GPT-4-style BPE vocabularies at this size); pass an exact counter built from the
+    tokenizer to :func:`estimate_session_tokens` otherwise.
+    """
+    whole, _, frac = timestamp_text(start_ms).partition(".")
+    return -(-len(whole) // 3) + ((1 + -(-len(frac) // 3)) if frac else 0)
 
 
 # ------------------------------------------------------------------ counting
@@ -169,6 +186,8 @@ def estimate_session_tokens(
     has_video: bool = True,
     has_audio: bool = True,
     n_assets: int = 1,
+    timestamp_mode: str = "embedding",
+    timestamp_tokens=None,
 ) -> TokenEstimate:
     """Estimate positions for a session BEFORE encoding (§5).
 
@@ -176,17 +195,29 @@ def estimate_session_tokens(
     3,600 markers + 8,000 text = 114,200 positions. Media and marker counts are
     per asset and multiplied by ``n_assets``. The per-window arithmetic matches
     :func:`plan_av_chunks` exactly for constant-rate sources.
+
+    ``timestamp_mode="text"`` replaces the ``<|ts|>`` marker with the window start
+    written in seconds: each window costs ``<|av_chunk|>`` plus
+    ``timestamp_tokens(start_ms)`` positions (default :func:`timestamp_positions`).
     """
     if chunk_seconds <= 0:
         raise ValueError("chunk_seconds must be positive")
     if markers_per_chunk < 0 or text_allowance < 0 or n_assets < 1:
         raise ValueError("markers_per_chunk and text_allowance must be >= 0, n_assets >= 1")
+    if timestamp_mode not in TIMESTAMP_MODES:
+        raise ValueError(f"timestamp_mode must be one of {TIMESTAMP_MODES}")
     duration_ms = _to_ms(duration_s)
     windows = _windows(duration_ms, _to_ms(chunk_seconds))
     vr, ar = _frac(policy.video_fps), _frac(policy.audio_tokens_per_second)
     video = sum(_samples_in(s, e, vr) for s, e in windows) * policy.tokens_per_frame if has_video else 0
     audio = sum(_samples_in(s, e, ar) for s, e in windows) if has_audio else 0
-    markers = len(windows) * markers_per_chunk if (has_video or has_audio) else 0
+    if not (has_video or has_audio):
+        markers = 0
+    elif timestamp_mode == "text":
+        count = timestamp_tokens or timestamp_positions
+        markers = sum(1 + count(s) for s, _ in windows)
+    else:
+        markers = len(windows) * markers_per_chunk
     return TokenEstimate(
         policy=policy.name,
         duration_s=float(duration_s),
@@ -250,6 +281,7 @@ def select_policy(
     has_video: bool = True,
     has_audio: bool = True,
     n_assets: int = 1,
+    timestamp_mode: str = "embedding",
 ) -> PolicyDecision:
     """Choose a sampling policy explicitly, in a defined order (§5).
 
@@ -269,6 +301,7 @@ def select_policy(
         raise ValueError(f"fallback must be one of {FALLBACKS} or None")
     kw = dict(
         markers_per_chunk=markers_per_chunk,
+        timestamp_mode=timestamp_mode,
         text_allowance=text_allowance,
         has_video=has_video,
         has_audio=has_audio,

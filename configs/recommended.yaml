@@ -1,0 +1,18 @@
+# Recommended defaults (docs/IMPROVEMENTS.md §1, §3, §4, §9): the low-risk changes, selectable as one config.
+# full.yaml remains the blueprint baseline; each change here is also a separate proxy-tournament
+# variant (configs/tournament/{kda,kv_heads_half,memory_off,text_timestamps,av_chunk_2s,recommended_defaults}.yaml)
+# and must win there before it replaces the baseline.
+extends: full.yaml
+model:
+  hybrid_pattern: [kda, kda, kda, gated_gqa]  # Kimi Delta Attention replaces GDN; the 3:1 ratio is kept
+attention:
+  kv_heads: 4  # 48 -> 24 KiB/token at BF16 (12 KiB with FP8 KV in serving)
+memory:
+  enabled: false  # Titans-style memory becomes a research track
+mtp:
+  layers: 1
+  draft_tokens: 1  # draft only what the MTP depth was trained for
+multimodal:
+  timestamp_mode: text  # "<|av_chunk|> 12": readable by the recurrent layers, which see no RoPE or time embedding
+  av_chunk_ms: 2000  # 2-second AV windows
+  audio_attention: causal  # 2 s is half a 4-s audio chunk: token-causal attention keeps windows causal

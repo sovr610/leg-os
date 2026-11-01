@@ -48,7 +48,7 @@ mtp:
   layers: 1
   mixer: standard_gqa
   dense_ffn_hidden: 11008
-  draft_tokens: 2
+  draft_tokens: 1  # blueprint §11 lists 2 with layers: 1; drafting 2 needs a trained depth-2 MTP (layers: 2)
 multimodal:
   vision_layers: 24
   vision_width: 1024

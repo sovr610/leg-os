@@ -16,7 +16,7 @@ from typing import Optional
 import torch
 
 from ..common import content_hash
-from ..config import GDN, M63Config
+from ..config import GDN, KDA, M63Config
 
 # Blueprint §3 reference table (resident parameters, billions).
 BLUEPRINT_REFERENCE = {
@@ -37,6 +37,7 @@ CATEGORIES = (
     "routed_experts",
     "shared_experts",
     "gdn_mixers",
+    "kda_mixers",
     "gqa_mixers",
     "norms",
     "embedding",
@@ -82,6 +83,8 @@ class ParameterManifest:
     def to_markdown(self) -> str:
         rows = ["| Component | Resident | Active per text token |", "|---|---:|---:|"]
         for c in CATEGORIES:
+            if not self.resident[c] and c not in BLUEPRINT_REFERENCE:
+                continue  # e.g. no KDA layers in the blueprint pattern
             rows.append(f"| {c} | {self.resident[c] / 1e9:.3f}B | {self.active[c] / 1e9:.3f}B |")
         rows.append(f"| tied LM head (shares embedding) | — | {self.head / 1e9:.3f}B when included |")
         rows.append(f"| **total** | **{self.total / 1e9:.3f}B** | **{self.active_excl_head / 1e9:.3f}B** "
@@ -107,7 +110,8 @@ def categorize(name: str, cfg: M63Config) -> str:
         if sub in ("mixer_norm", "moe_norm"):
             return "norms"
         if sub == "mixer":
-            return "gdn_mixers" if cfg.layer_kinds()[layer] == GDN else "gqa_mixers"
+            kind = cfg.layer_kinds()[layer]
+            return "gdn_mixers" if kind == GDN else "kda_mixers" if kind == KDA else "gqa_mixers"
         if sub == "moe":
             if parts[3] == "router":
                 return "routers_memory"
@@ -144,7 +148,8 @@ def analytic_backbone(cfg: M63Config) -> dict[str, int]:
     g, a, moe = cfg.gdn, cfg.attention, cfg.moe
     kinds = cfg.layer_kinds()
     n_gdn = sum(k == GDN for k in kinds)
-    n_gqa = L - n_gdn
+    n_kda = sum(k == KDA for k in kinds)
+    n_gqa = L - n_gdn - n_kda
     expert = 3 * d * moe.expert_hidden
     gdn = (2 * d * g.heads * g.key_dim + d * g.inner_width  # q, k, v
            + 2 * d * g.heads  # a, b
@@ -152,12 +157,21 @@ def analytic_backbone(cfg: M63Config) -> dict[str, int]:
            + g.inner_width * d  # o
            + (2 * g.heads * g.key_dim + g.inner_width) * g.conv_kernel  # short convs
            + 2 * g.heads + g.value_dim)  # A_log, dt_bias, output norm
+    rank = g.kda_low_rank or g.key_dim
+    kda = (2 * d * g.heads * g.key_dim + d * g.inner_width  # q, k, v
+           + d * rank + rank * g.heads * g.key_dim  # channel-wise forget gate (low rank)
+           + d * g.heads  # beta
+           + ((d + g.inner_width) * rank if g.output_gate else 0)  # low-rank sigmoid output gate
+           + g.inner_width * d  # o
+           + (2 * g.heads * g.key_dim + g.inner_width) * g.conv_kernel  # short convs
+           + g.heads + g.heads * g.key_dim + g.value_dim)  # A_log, per-channel dt_bias, output norm
     qd, kvd = a.query_heads * a.head_dim, a.kv_heads * a.head_dim
     gqa = d * qd + 2 * d * kvd + qd * d + (d * qd if a.output_gate else 0) + (2 * a.head_dim if a.qk_norm else 0)
     return {
         "routed_experts": L * moe.routed_experts * expert,
         "shared_experts": L * moe.shared_experts * expert,
         "gdn_mixers": n_gdn * gdn,
+        "kda_mixers": n_kda * kda,
         "gqa_mixers": n_gqa * gqa,
         "embedding": cfg.model.vocab_size * d * (1 if cfg.model.tie_embeddings else 2),
         "routers": L * moe.routed_experts * d,

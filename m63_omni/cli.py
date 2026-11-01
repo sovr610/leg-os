@@ -38,21 +38,33 @@ def cmd_capacity(a: argparse.Namespace) -> int:
     from .runtime import capacity as cap
 
     cfg = _cfg(a.config)
-    total = build_manifest(cfg).total
+    manifest = build_manifest(cfg)
+    total = manifest.total
     print(f"KV per token (BF16): {cap.kv_bytes_per_token(cfg):,.0f} bytes; full-attention control: "
           f"{cap.full_attention_kv_bytes_per_token(cfg):,.0f} bytes")
+    print("per-session lower bound (blueprint §4, BF16 KV + state + memory):")
     for t in (32768, 131072, 262144):
         f = cap.session_footprint(cfg, t)
-        print(f"  {t // 1024:>4}K session: KV {f.kv / cap.GiB:.2f} GiB + GDN {f.gdn / cap.MiB:.1f} MiB + memory {f.memory / cap.MiB:.1f} MiB")
+        print(f"  {t // 1024:>4}K: KV {f.kv / cap.GiB:.2f} GiB + recurrent {f.gdn / cap.MiB:.1f} MiB + memory {f.memory / cap.MiB:.1f} MiB")
+    print("per-session serving view (FP8 KV, BF16 state, MTP KV, state checkpoint every 8K tokens, paged):")
+    for t in (32768, 131072, 262144):
+        f = cap.serving_footprint(cfg, t)
+        print(f"  {t // 1024:>4}K: {f.total / 1e9:.2f} GB (KV {f.kv / 1e9:.2f}, MTP KV {f.mtp_kv / 1e9:.2f}, "
+              f"checkpoints {f.checkpoints / 1e9:.2f}, state+memory {(f.gdn + f.memory) / 1e6:.0f} MB)")
     for d in ("bfloat16", "fp8", "int4"):
         b = cap.weight_bytes(total, d)
         print(f"weights {d:>8}: {b / 1e9:.2f} GB ({b / cap.GiB:.2f} GiB)")
     n = cap.sessions_per_deployment(cfg, total, a.gpus, a.gpu_gb * 1e9, a.context)
     print(f"upper bound on concurrent {a.context // 1024}K sessions on {a.gpus}x{a.gpu_gb:.0f}GB (BF16, 20% reserve): {n}")
     base, allow = cap.training_flops(5e9, 4.75e12)
-    print(f"training FLOPs: {base:.3e} (6ND), {allow:.3e} with 30% allowance")
-    for g in (256, 512):
-        print(f"  {g} GPUs: {cap.training_days(allow, g, 250):.1f} days @250 TFLOP/s, {cap.training_days(allow, g, 350):.1f} days @350")
+    print(f"blueprint §14 training FLOPs: {base:.3e} (6ND), {allow:.3e} with 30% allowance")
+    tc = cap.training_compute(cfg, manifest=manifest)
+    b = tc.backbone
+    print(f"corrected training FLOPs (§8 curriculum): {tc.total:.3e} = 6ND {b:.3e} + MTP {tc.mtp / b:+.1%} "
+          f"+ attention {tc.attention / b:+.1%} + recurrent {tc.recurrent / b:+.1%} + encoders {tc.encoders / b:+.1%}")
+    for hw, (lo, typ, hi) in cap.HARDWARE.items():
+        days = ", ".join(f"{g} GPUs {tc.days(g, hw):.0f} d ({tc.days(g, hw, 2):.0f}-{tc.days(g, hw, 0):.0f})" for g in (256, 512))
+        print(f"  {hw:>10} ~{typ:.0f} TFLOP/s sustained ({lo:.0f}-{hi:.0f}): {tc.gpu_hours(hw) / 1e3:,.0f}K GPU-h; {days}")
     return 0
 
 

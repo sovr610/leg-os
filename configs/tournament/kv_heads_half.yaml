@@ -1,0 +1,4 @@
+# KV ablation: half the proxy's KV heads (2 -> 1), the proxy analogue of the reference 8 -> 4
+# (48 -> 24 KiB/token at BF16). Absolute value: applies to proxy-shaped and tiny bases (both use 2).
+extends: ../proxy_1b3.yaml
+attention: {kv_heads: 1}

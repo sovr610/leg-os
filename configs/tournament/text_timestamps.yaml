@@ -1,0 +1,4 @@
+# AV ablation: the window start written as text after <|av_chunk|> instead of a <|ts|> time embedding.
+# Multimodal-only: the text tournament reports it as skipped; score it on media data.
+extends: ../proxy_1b3.yaml
+multimodal: {timestamp_mode: text}

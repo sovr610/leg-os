@@ -22,8 +22,12 @@ forced — so decoding always terminates with a schema-valid value.
 The regex engine is a small Thompson-NFA compiler for the subset used by the
 action schemas (classes, ranges, groups, alternation, ``* + ? {m,n}``,
 ``\\d \\w \\s``) with *prefix viability*: whether a partial string can still be
-extended to a full match. Production serving would precompile per-state token
-masks (as Outlines/XGrammar do); this reference caches masks per NFA state set.
+extended to a full match. Token masks come from a vocabulary trie over the
+pattern's character classes (tokens the pattern cannot tell apart share one
+path) walked with a lazily built DFA, pruned as soon as a prefix can no longer
+complete within ``max_len``, and cached per state set. Integer masks only visit
+digit tokens. Production serving uses an engine grammar (llguidance/XGrammar);
+this decoder is the correctness oracle.
 """
 
 from __future__ import annotations
@@ -449,6 +453,51 @@ class IntegerConstraint(Constraint):
             k += 1
 
 
+# ======================================================= vocabulary tries
+class _ClassTrie:
+    """The clean vocabulary as a trie over one pattern's character classes.
+
+    Two characters are in the same class when every character set in the
+    pattern treats them alike, so the walk depends only on class sequences;
+    tokens sharing a class sequence share a leaf (a tensor of token IDs). A
+    node is a dict ``{class_id: child, None: ids}``.
+    """
+
+    def __init__(self, regex: Regex, token_text: Sequence[Optional[str]], ids: Sequence[int]) -> None:
+        self.sets = [cs for edges in regex.edges for cs, _ in edges]
+        self._cls: dict[str, int] = {}
+        self._sig: dict[tuple, int] = {}
+        self.rep: list[str] = []  # class id -> representative character
+        groups: dict[tuple, list[int]] = {}
+        for i in ids:
+            groups.setdefault(tuple(self.cls(ch) for ch in token_text[i]), []).append(i)
+        self.root: dict = {}
+        for key, members in groups.items():
+            node = self.root
+            for c in key:
+                node = node.setdefault(c, {})
+            node[None] = torch.tensor(members, dtype=torch.long)
+        self.trans: dict[tuple[frozenset[int], int], frozenset[int]] = {}  # lazy DFA
+
+    def cls(self, ch: str) -> int:
+        c = self._cls.get(ch)
+        if c is None:
+            sig = tuple(cs.matches(ch) for cs in self.sets)
+            c = self._sig.get(sig)
+            if c is None:
+                c = self._sig[sig] = len(self.rep)
+                self.rep.append(ch)
+            self._cls[ch] = c
+        return c
+
+    def step(self, regex: Regex, states: frozenset[int], c: int) -> frozenset[int]:
+        key = (states, c)
+        nxt = self.trans.get(key)
+        if nxt is None:
+            nxt = self.trans[key] = regex.step(states, self.rep[c])
+        return nxt
+
+
 # ============================================================ the decoder
 class StructuredDecodeError(RuntimeError):
     pass
@@ -482,6 +531,9 @@ class SchemaDecoder:
             self.token_text.append(t if t else None)
         self._clean = torch.tensor([t is not None and not (_FORBIDDEN & set(t)) for t in self.token_text])
         self._lens = torch.tensor([len(t) if t else 0 for t in self.token_text])
+        self._clean_ids = self._clean.nonzero().flatten().tolist()
+        self._digit_ids = [i for i in self._clean_ids if all("0" <= ch <= "9" for ch in self.token_text[i])]
+        self._tries: dict[str, _ClassTrie] = {}
         self._mask_cache: dict[Any, torch.Tensor] = {}
 
     # ---------------------------------------------------------- primitives
@@ -514,24 +566,54 @@ class SchemaDecoder:
             return self._mask_cache[key]
         if isinstance(c, RegexConstraint):
             states = c.regex.run(cur)
-            key = ("re", c.pattern, states, remaining)
+            key = ("re", c.pattern, c.max_len, c.min_len, states, remaining)
+            if key not in self._mask_cache:
+                self._mask_cache[key] = self._regex_mask(c, states, len(cur))
+            return self._mask_cache[key]
+        if isinstance(c, IntegerConstraint):
+            key = ("int", c.lo, c.hi, cur)
             if key not in self._mask_cache:
                 mask = torch.zeros(len(self.token_text), dtype=torch.bool)
-                for i in self._clean.nonzero().flatten().tolist():
-                    t = self.token_text[i]
-                    if len(t) > remaining:
-                        continue
-                    st = states
-                    for ch in t:
-                        st = c.regex.step(st, ch)
-                        if not st:
-                            break
-                    mask[i] = c.viable_states(st, len(cur) + len(t))
+                ok = [i for i in self._digit_ids if c.viable(cur + self.token_text[i])]
+                mask[ok] = True
                 self._mask_cache[key] = mask
             return self._mask_cache[key]
-        mask = torch.zeros(len(self.token_text), dtype=torch.bool)
-        for i in self._clean.nonzero().flatten().tolist():
+        mask = torch.zeros(len(self.token_text), dtype=torch.bool)  # generic constraint: brute force
+        for i in self._clean_ids:
             mask[i] = c.viable(cur + self.token_text[i])
+        return mask
+
+    def _regex_mask(self, c: RegexConstraint, states: frozenset[int], base: int) -> torch.Tensor:
+        """Walk the pattern's class trie from ``states``; ``base`` characters are already generated.
+
+        ``n + min_remaining`` never decreases along a path (each character adds 1
+        to ``n`` and lowers the distance to accept by at most 1), so a node that
+        cannot complete within ``max_len`` prunes its whole subtree.
+        """
+        trie = self._tries.get(c.pattern)
+        if trie is None:
+            trie = self._tries[c.pattern] = _ClassTrie(c.regex, self.token_text, self._clean_ids)
+        mask = torch.zeros(len(self.token_text), dtype=torch.bool)
+        if not c.viable_states(states, base):
+            return mask
+        hits: list[torch.Tensor] = []
+        stack = [(trie.root, states, base)]
+        while stack:
+            node, st, n = stack.pop()
+            if n + 1 > c.max_len:
+                continue
+            for cl, child in node.items():
+                if cl is None:
+                    continue
+                nst = trie.step(c.regex, st, cl)
+                if not c.viable_states(nst, n + 1):
+                    continue
+                ids = child.get(None)
+                if ids is not None:
+                    hits.append(ids)
+                stack.append((child, nst, n + 1))
+        if hits:
+            mask[torch.cat(hits)] = True
         return mask
 
     def gen(self, c: Constraint, terminator: str) -> str:

@@ -10,7 +10,10 @@
   hop), causal stride-2 convolutions downsampling by 16 (6.25 tokens/s; by 8
   for the 12.5 tokens/s high-fidelity mode), and a 20-layer width-1,024
   chunk-aware transformer (block-causal attention over the current and previous
-  chunk). A small CTC head supports the ASR auxiliary loss.
+  chunk; ``audio_attention: causal`` makes it token-causal with the same
+  two-chunk lookback, so AV windows need not align with chunks). A small CTC
+  head supports the ASR auxiliary loss. Token ``j`` depends only on audio
+  before its end time ``(j + 1) / rate``.
 
 "Native" means these encoders are trained jointly with the backbone from the
 first full run (§5); it does not mean encoder-free.
@@ -211,8 +214,13 @@ class AudioEncoder(nn.Module):
         L = x.shape[1]
         x = x + sinusoidal_features(torch.arange(L, device=x.device).float(), x.shape[-1]).to(x.dtype)
         chunk = self.cfg.audio_chunk_tokens * (2 if high_fidelity else 1)
-        c = torch.arange(L, device=x.device) // chunk
-        mask = (c.unsqueeze(0) <= c.unsqueeze(1)) & (c.unsqueeze(0) >= c.unsqueeze(1) - 1)
+        pos = torch.arange(L, device=x.device)
+        if self.cfg.audio_attention == "causal":  # mask[q, k]: k in (q - 2*chunk, q]
+            lag = pos.unsqueeze(1) - pos.unsqueeze(0)
+            mask = (lag >= 0) & (lag < 2 * chunk)
+        else:  # mask[q, k]: k in the query's chunk or the previous one
+            c = pos // chunk
+            mask = (c.unsqueeze(0) <= c.unsqueeze(1)) & (c.unsqueeze(0) >= c.unsqueeze(1) - 1)
         for layer in self.layers:
             x = layer(x, mask)
         x = self.ln_post(x)

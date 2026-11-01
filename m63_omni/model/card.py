@@ -6,7 +6,7 @@ number is computed from the config and the code-generated parameter manifest.
 
 from __future__ import annotations
 
-from ..config import GATED_GQA, GDN, M63Config
+from ..config import GATED_GQA, GDN, KDA, M63Config
 from ..runtime import capacity as cap
 from .manifest import BLUEPRINT_REFERENCE, ParameterManifest, build_manifest
 
@@ -27,6 +27,7 @@ def model_card(cfg: M63Config, manifest: ParameterManifest | None = None) -> dic
             "layers": cfg.model.layers,
             "pattern": list(cfg.model.hybrid_pattern),
             "gdn_layers": kinds.count(GDN),
+            "kda_layers": kinds.count(KDA),
             "attention_layers": kinds.count(GATED_GQA),
             "hidden_size": cfg.model.hidden_size,
             "vocab_size": cfg.model.vocab_size,
@@ -43,7 +44,22 @@ def model_card(cfg: M63Config, manifest: ParameterManifest | None = None) -> dic
         "memory_state_bytes_bf16": cap.memory_state_bytes(cfg),
         "weights_bytes": {d: cap.weight_bytes(total, d) for d in ("bfloat16", "fp8", "int4")},
         "training_flops_reference": {"dense_6ND": flops, "with_30pct_allowance": flops_allow},
+        "training_compute": cap.training_compute(cfg, manifest=m).to_dict(),
+        "mtp": {"depth": cfg.mtp.layers if cfg.mtp.enabled else 0, "draft_tokens": cfg.mtp.draft_tokens,
+                "share_weights": cfg.mtp.share_weights},
     }
+
+
+def _compute_lines(tc: dict) -> str:
+    b = tc["backbone_6ND"]
+    lines = [f"- 6·N·D with the tied head: {b:.3e} FLOPs over {tc['positions'] / 1e12:.2f}T positions",
+             f"- Terms 6·N·D omits: MTP +{tc['mtp'] / b:.1%}, attention +{tc['attention'] / b:.1%}, "
+             f"recurrent mixers +{tc['recurrent'] / b:.1%}, vision encoder +{tc['encoders'] / b:.1%} "
+             "(assumes 4 patches per visual position)",
+             f"- Total {tc['total']:.3e} FLOPs: "
+             + ", ".join(f"{hw} ~{cap.training_days(tc['total'], 256, typ):.0f} days on 256 GPUs"
+                         for hw, (_, typ, _) in cap.HARDWARE.items())]
+    return "\n".join(lines)
 
 
 def model_card_markdown(cfg: M63Config) -> str:
@@ -67,7 +83,9 @@ def model_card_markdown(cfg: M63Config) -> str:
         "## Backbone",
         "",
         f"- {c['backbone']['layers']} blocks, pattern `{c['backbone']['pattern']}` "
-        f"({c['backbone']['gdn_layers']} GDN, {c['backbone']['attention_layers']} gated GQA)",
+        f"({c['backbone']['gdn_layers']} GDN, "
+        + (f"{c['backbone']['kda_layers']} KDA, " if c["backbone"]["kda_layers"] else "")
+        + f"{c['backbone']['attention_layers']} gated GQA)",
         f"- MoE: {c['moe']['routed']} routed + {c['moe']['shared']} shared, top-{c['moe']['top_k']}, dropless",
         f"- Neural memory: {'anchors ' + str(c['memory']['anchors']) if c['memory']['enabled'] else 'disabled'}",
         "",
@@ -75,9 +93,14 @@ def model_card_markdown(cfg: M63Config) -> str:
         "",
         f"- GQA KV per token: {kv:,.0f} bytes ({kv / 1024:.0f} KiB)",
         "- Per-session KV: " + ", ".join(f"{int(k) // 1024}K → {_gib(cap.kv_bytes(cfg, int(k)))}" for k in c["session_bytes_bf16"]),
-        f"- GDN recurrent state: {c['gdn_state_bytes_bf16'] / cap.MiB:.1f} MiB per session",
+        f"- Recurrent (GDN/KDA) state: {c['gdn_state_bytes_bf16'] / cap.MiB:.1f} MiB per session",
         f"- Neural memory weights + momentum: {c['memory_state_bytes_bf16'] / cap.MiB:.1f} MiB per session",
         "- Raw weights: " + ", ".join(f"{k} {v / 1e9:.2f} GB ({_gib(v)})" for k, v in c["weights_bytes"].items()),
+        f"- MTP: depth {c['mtp']['depth']}, drafts up to {c['mtp']['draft_tokens']} token(s) per step",
+        "",
+        "## Training compute (derived, §8 curriculum)",
+        "",
+        _compute_lines(c["training_compute"]),
         "",
         "## Limitations (always stated)",
         "",

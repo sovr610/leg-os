@@ -33,6 +33,22 @@ def test_node_limited_routing():
     assert (nodes == nodes[:, :1]).all()  # both experts on a single node
 
 
+def test_node_limit_is_skipped_exactly_when_it_cannot_bind():
+    """top-k <= max_nodes (the reference top-2 / 2 nodes) never changes a selection; top-4 / 2 nodes does."""
+    h = torch.randn(512, 16)
+    r, _ = _router(routed_experts=16, experts_per_node=2, max_nodes_per_token=2, top_k=2)
+    assert not r.node_limited
+    sel = torch.sigmoid(h @ r.weight.t()) + r.bias
+    assert torch.equal(r(h)[0], sel.topk(2, dim=-1).indices)
+    r4, cfg4 = _router(routed_experts=16, experts_per_node=2, max_nodes_per_token=2, top_k=4)
+    assert r4.node_limited
+    idx, *_ = r4(h)
+    nodes = idx // cfg4.experts_per_node
+    assert max(len(set(row.tolist())) for row in nodes) <= 2
+    unrestricted = (torch.sigmoid(h @ r4.weight.t()) + r4.bias).topk(4, dim=-1).indices // cfg4.experts_per_node
+    assert any(len(set(row.tolist())) > 2 for row in unrestricted)  # the limit binds for some tokens
+
+
 def test_bias_update_favours_underloaded_experts():
     r, cfg = _router()
     counts = torch.tensor([100, 0, 50, 50, 50, 50, 50, 50])

@@ -106,9 +106,11 @@ class Session:
         ttl_seconds: Optional[float] = None,
         artifact_store: Optional[ArtifactStore] = None,
         announce_attach: bool = False,
+        text_encoder: Optional[Callable[[str], Sequence[int]]] = None,
         _checkpoints: Optional[dict[str, Checkpoint]] = None,
     ) -> None:
         self.model = model
+        self.text_encoder = text_encoder  # spells text timestamps (multimodal.timestamp_mode: text)
         self.tenant_id, self.session_id, self.branch_id = tenant_id, session_id, branch_id
         self.model_version = model.cfg.fingerprint()
         self.tokenizer_version = tokenizer_version
@@ -254,7 +256,7 @@ class Session:
         if self.model.multimodal is None:
             raise ValueError("model was built without the multimodal front end")
         specs = [self._store_part(p) for p in parts]
-        seq = build_sequence(self.model, parts)
+        seq = build_sequence(self.model, parts, text_encoder=self.text_encoder)
         updates = self._process(seq.trust, allow_memory_write, embeds=seq.inputs_embeds, modality_ids=seq.modality_ids)
         mm = self.model.cfg.multimodal
         ev = self.log.append_ingest(
@@ -409,7 +411,8 @@ class Session:
 
     def _apply(self, ev: Event) -> None:
         if ev.kind == "ingest" and "multimodal" in ev.payload:
-            seq = build_sequence(self.model, [self._load_part(s) for s in ev.payload["multimodal"]])
+            seq = build_sequence(self.model, [self._load_part(s) for s in ev.payload["multimodal"]],
+                                 text_encoder=self.text_encoder)
             self._process(seq.trust, ev.payload.get("allow_memory_write", True),
                           embeds=seq.inputs_embeds, modality_ids=seq.modality_ids)
         elif ev.kind == "ingest" and "tokens" in ev.payload:
@@ -444,7 +447,8 @@ class Session:
         branch = self.log.create_branch(parent_event_id, reason, name, tenant_id=self.tenant_id)
         child = Session(self.model, self.tenant_id, self.session_id, event_log=self.log, branch_id=branch,
                         tokenizer_version=self.tokenizer_version, memory_enabled=self.memory_enabled, clock=self.clock,
-                        ttl_seconds=self.ttl, artifact_store=self.store, _checkpoints=self.checkpoints)
+                        ttl_seconds=self.ttl, artifact_store=self.store, text_encoder=self.text_encoder,
+                        _checkpoints=self.checkpoints)
         child._rebuild(branch, use_checkpoints=True)
         child._checkpoint()
         return child

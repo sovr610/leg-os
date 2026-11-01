@@ -1,6 +1,7 @@
 """M63-Omni backbone (blueprint §3, §4, §6, Appendix A).
 
-48 pre-RMSNorm residual blocks arranged as 12 x ``[GDN, GDN, GDN, Gated GQA]``;
+48 pre-RMSNorm residual blocks arranged as 12 x ``[GDN, GDN, GDN, Gated GQA]``
+(``kda`` may replace ``gdn`` in the pattern for the proxy tournament);
 every block's mixer is followed by a sparse MoE FFN (64 routed + 1 shared,
 top-2). Embeddings are tied with the LM head. Neural-memory anchors sit at
 attention layers 16/32/48 (1-indexed) and append their read tokens to that
@@ -24,15 +25,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..config import GATED_GQA, GDN, M63Config
+from ..config import GATED_GQA, GDN, KDA, RECURRENT_KINDS, M63Config
 from .attention import GatedGQA
 from .cache import HybridCache, StreamIndex, resolve_stream
 from .encoders import MultimodalFrontEnd
 from .gdn import GatedDeltaNet
+from .kda import KimiDeltaAttention
 from .layers import RMSNorm
 from .memory import MemoryState, NeuralMemoryAnchor
 from .moe import MoELayer, RouterStats
-from .mtp import MTPModule
+from .mtp import MTPStack
 
 IGNORE_INDEX = -100
 
@@ -47,7 +49,12 @@ class HybridBlock(nn.Module):
         d, eps = cfg.model.hidden_size, cfg.model.norm_eps
         self.layer_idx, self.kind = layer_idx, kind
         self.mixer_norm = RMSNorm(d, eps)
-        self.mixer = GatedDeltaNet(d, cfg.gdn, eps) if kind == GDN else GatedGQA(d, cfg.attention, eps)
+        if kind == GDN:
+            self.mixer = GatedDeltaNet(d, cfg.gdn, eps)
+        elif kind == KDA:
+            self.mixer = KimiDeltaAttention(d, cfg.gdn, eps)
+        else:
+            self.mixer = GatedGQA(d, cfg.attention, eps)
         self.moe_norm = RMSNorm(d, eps)
         self.moe = MoELayer(d, cfg.moe)
 
@@ -61,7 +68,7 @@ class HybridBlock(nn.Module):
         valid: Optional[torch.Tensor],
         gdn_mode: str,
     ):
-        if self.kind == GDN:
+        if self.kind in RECURRENT_KINDS:
             m, new_state = self.mixer(self.mixer_norm(x), state, idx.reset, gdn_mode)
         else:
             m, new_state = self.mixer(self.mixer_norm(x), idx, state, extra_kv)
@@ -106,7 +113,7 @@ class M63Omni(nn.Module):
         self.final_norm = RMSNorm(d, m.norm_eps)
         self.lm_head = None if m.tie_embeddings else nn.Linear(d, m.vocab_size, bias=False)
         self.memory = nn.ModuleDict({str(i): NeuralMemoryAnchor(d, cfg.memory, m.norm_eps) for i in cfg.memory_anchor_indices()})
-        self.mtp = MTPModule(cfg) if cfg.mtp.enabled else None
+        self.mtp = MTPStack(cfg) if cfg.mtp.enabled else None
         self.multimodal = MultimodalFrontEnd(cfg.multimodal, d) if cfg.multimodal.enabled else None
         self.reset_parameters()
 
@@ -165,7 +172,7 @@ class M63Omni(nn.Module):
         if gdn_backend is not None and gdn_backend not in GDN_BACKENDS:
             raise ValueError(f"unknown GDN backend {gdn_backend!r}")
         attn = attention_backend or (None if reference_attention is None else ("reference" if reference_attention else "sdpa"))
-        mtp_attn = [self.mtp.attn] if self.mtp is not None else []
+        mtp_attn = [m.attn for m in self.mtp.depths] if self.mtp is not None else []
         for b in self.blocks:
             if moe_impl is not None:
                 b.moe.impl = moe_impl
@@ -261,16 +268,28 @@ class M63Omni(nn.Module):
         if compute_mtp and self.mtp is not None:
             if input_ids is None:
                 raise ValueError("MTP training needs input_ids for next-token embeddings")
-            next_ids = torch.cat([input_ids[:, 1:], input_ids[:, -1:]], dim=1)
-            mtp_hidden, _ = self.mtp(hidden_raw, self.embed(next_ids), idx)
-            out.mtp_logits = self.logits(mtp_hidden)
-            if labels is not None:
-                mtp_labels = torch.cat([labels[:, 1:], torch.full_like(labels[:, :1], IGNORE_INDEX)], dim=1)
-                mtp_labels = mtp_labels.masked_fill(labels == IGNORE_INDEX, IGNORE_INDEX)
-                n = int((mtp_labels != IGNORE_INDEX).sum())
-                out.mtp_tokens = n
-                out.mtp_loss = F.cross_entropy(out.mtp_logits.float().reshape(-1, out.mtp_logits.shape[-1]),
-                                               mtp_labels.reshape(-1), ignore_index=IGNORE_INDEX, reduction="sum") / max(n, 1)
+            # Depth j at position t: fuse depth j-1's output with Emb(x_{t+j}), predict x_{t+j+1} = labels[t+j].
+            # A target counts only if every intermediate label is valid, i.e. inside the same document.
+            h, losses = hidden_raw, []
+            valid = None if labels is None else labels != IGNORE_INDEX
+            for j in range(1, self.mtp.depth + 1):
+                nxt = torch.cat([input_ids[:, j:], input_ids[:, -1:].expand(-1, min(j, T))], dim=1)[:, :T]
+                h, _ = self.mtp.at(j)(h, self.embed(nxt), idx)
+                logits_j = self.logits(h)
+                if j == 1:
+                    out.mtp_logits = logits_j
+                if labels is None:
+                    continue
+                lab = torch.cat([labels[:, j:], torch.full_like(labels[:, : min(j, T)], IGNORE_INDEX)], dim=1)[:, :T]
+                valid = valid & (lab != IGNORE_INDEX)
+                n = int(valid.sum())
+                if j == 1:
+                    out.mtp_tokens = n
+                losses.append(F.cross_entropy(logits_j.float().reshape(-1, logits_j.shape[-1]),
+                                              lab.masked_fill(~valid, IGNORE_INDEX).reshape(-1),
+                                              ignore_index=IGNORE_INDEX, reduction="sum") / max(n, 1))
+            if losses:
+                out.mtp_loss = torch.stack(losses).mean()  # L_MTP = (1/D) sum_j L_j
         return out
 
     # ------------------------------------------------------ segmented memory
