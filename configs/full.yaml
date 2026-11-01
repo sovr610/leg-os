@@ -1,0 +1,76 @@
+# M63-Omni reference configuration (blueprint §11).
+# Every key is validated strictly against m63_omni/config.py; unknown keys are rejected.
+# Generated parameter manifest: `m63 manifest --config configs/full.yaml`
+model:
+  name: m63_omni
+  hidden_size: 4096
+  layers: 48
+  hybrid_pattern: [gdn, gdn, gdn, gated_gqa]  # repeat 12 times
+  vocab_size: 131072
+  special_tokens: 256
+  tie_embeddings: true
+  norm: rmsnorm_pre
+  context_targets: [131072, 262144]
+gdn:
+  heads: 16
+  key_dim: 128
+  value_dim: 128
+  inner_width: 2048
+  conv_kernel: 4
+  train_chunk: 64
+  decode_mode: recurrent
+  decay_gate_dtype: float32
+attention:
+  query_heads: 32
+  kv_heads: 8
+  head_dim: 128
+  rotary_dims: 32
+  qk_norm: true
+  output_gate: true
+moe:
+  routed_experts: 64
+  shared_experts: 1
+  top_k: 2
+  expert_hidden: 1536
+  activation: swiglu
+  router: normalized_sigmoid_with_load_bias
+  max_nodes_per_token: 2
+  token_dropping: false
+memory:
+  enabled: true
+  anchors: [16, 32, 48]
+  read_tokens_per_anchor: 8
+  update_segment_tokens: 2048
+  mlp_shape: [256, 512, 256]
+  freeze_during_decode: true
+  untrusted_persistent_writes: false
+mtp:
+  layers: 1
+  mixer: standard_gqa
+  dense_ffn_hidden: 11008
+  draft_tokens: 2
+multimodal:
+  vision_layers: 24
+  vision_width: 1024
+  temporal_layers: 4
+  audio_layers: 20
+  audio_width: 1024
+  audio_sample_rate: 16000
+  audio_tokens_per_second: 6.25
+  explicit_timestamps: true
+training:
+  precision: bf16
+  optimizer: adamw
+  peak_lr: 0.0002
+  betas: [0.9, 0.95]
+  weight_decay: 0.1
+  clip_grad_norm: 1.0
+  global_batch_tokens: 8388608
+  schedule: warmup_stable_decay
+  token_dropping: false
+runtime:
+  paged_kv: true
+  recurrent_state_manager: true
+  multimodal_prefix_hash: true
+  copy_on_write_branches: true
+  memory_off_fallback: true

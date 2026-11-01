@@ -1,0 +1,12 @@
+# Step 6 proxy tournament base (blueprint §12): ~1.13B resident, ~0.23B active.
+# 16 layers so 1:1, 3:1 and 7:1 patterns all place attention at layers 8 and 16.
+extends: full.yaml
+model: {hidden_size: 1024, layers: 16}
+gdn: {heads: 8, inner_width: 1024}
+attention: {query_heads: 8, kv_heads: 2}
+moe: {routed_experts: 16, expert_hidden: 1024, experts_per_node: 4}
+memory: {anchors: [8, 16], mlp_shape: [128, 256, 128]}
+mtp: {dense_ffn_hidden: 2816}
+multimodal: {vision_layers: 6, vision_width: 512, vision_heads: 8, temporal_layers: 2,
+             audio_layers: 6, audio_width: 512, audio_heads: 8}
+training: {global_batch_tokens: 1048576, batch_ramp_start_tokens: 524288, warmup_positions: 200000000, peak_lr: 0.0006}

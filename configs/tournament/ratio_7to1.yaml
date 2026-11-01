@@ -1,0 +1,3 @@
+# Proxy tournament: 7:1 GDN:GQA ratio.
+extends: ../proxy_1b3.yaml
+model: {hybrid_pattern: [gdn, gdn, gdn, gdn, gdn, gdn, gdn, gated_gqa]}

@@ -1,0 +1,3 @@
+# GDN/GQA MoE core without neural memory.
+extends: ../proxy_1b3.yaml
+memory: {enabled: false}

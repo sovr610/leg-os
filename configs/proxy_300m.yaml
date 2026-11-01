@@ -1,0 +1,7 @@
+# Smallest proxy (blueprint §12, 300M class).
+extends: proxy_1b3.yaml
+model: {hidden_size: 768}
+gdn: {heads: 6, inner_width: 768}
+attention: {query_heads: 6, kv_heads: 2}
+moe: {routed_experts: 8, expert_hidden: 384, experts_per_node: 4}
+mtp: {dense_ffn_hidden: 2048}

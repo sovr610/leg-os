@@ -1,0 +1,3 @@
+# Router ablation: top-1.
+extends: ../proxy_1b3.yaml
+moe: {top_k: 1}

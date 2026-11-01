@@ -1,0 +1,12 @@
+# Step 7 distributed pilot (blueprint §12): 8-12B total, ~2B active, native multimodal,
+# 200-300B positions. Manifest: ~10.56B resident, ~2.29B active (excl. head).
+extends: full.yaml
+model: {hidden_size: 2048, layers: 32}
+gdn: {heads: 16, inner_width: 2048}
+attention: {query_heads: 16, kv_heads: 4}
+moe: {routed_experts: 16, expert_hidden: 2816, experts_per_node: 4}
+memory: {anchors: [12, 24, 32]}
+mtp: {dense_ffn_hidden: 5632}
+multimodal: {vision_layers: 12, vision_width: 768, vision_heads: 12, temporal_layers: 2,
+             audio_layers: 12, audio_width: 768, audio_heads: 12}
+training: {global_batch_tokens: 4194304, warmup_positions: 500000000}

@@ -1,0 +1,9 @@
+# Serving profile (blueprint §14): paged KV, recurrent-state manager, CoW branches,
+# memory-off fallback, MTP proposer with a target-only path always available.
+extends: full.yaml
+runtime:
+  kv_block_tokens: 256
+  kv_dtype: bfloat16
+  session_ttl_seconds: 7200
+memory:
+  state_dtype: bfloat16

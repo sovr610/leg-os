@@ -1,0 +1,2 @@
+# Proxy tournament: 3:1 GDN:GQA ratio (reference prior).
+extends: ../proxy_1b3.yaml

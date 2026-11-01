@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "m63-omni"
+version = "0.1.0"
+description = "M63-Omni: reference implementation of a mid-tier hybrid (GDN/GQA) sparse-MoE native-multimodal orchestrator"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.3",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+m63 = "m63_omni.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["m63_omni*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --import-mode=importlib"
+markers = [
+    "slow: long-running reference tests (deselect with -m 'not slow')",
+]

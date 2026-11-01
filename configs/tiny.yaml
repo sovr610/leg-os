@@ -1,0 +1,13 @@
+# CPU-sized config preserving every structural feature (used by tests and `m63 train`).
+model: {hidden_size: 64, layers: 8, vocab_size: 512, special_tokens: 64, context_targets: [1024, 2048]}
+gdn: {heads: 2, key_dim: 16, value_dim: 16, inner_width: 32, train_chunk: 8}
+attention: {query_heads: 4, kv_heads: 2, head_dim: 16, rotary_dims: 8, rope_theta: 10000.0}
+moe: {routed_experts: 8, top_k: 2, expert_hidden: 32, experts_per_node: 2, max_nodes_per_token: 2}
+memory: {anchors: [4, 8], read_tokens_per_anchor: 4, update_segment_tokens: 16, mlp_shape: [16, 32, 16]}
+mtp: {dense_ffn_hidden: 96}
+multimodal: {vision_layers: 2, vision_width: 32, vision_heads: 2, patch_size: 4, max_patch_grid: 8,
+             resampler_max_queries: 16, temporal_layers: 1, max_frames: 32, audio_layers: 2, audio_width: 32,
+             audio_heads: 2, mel_bins: 16, audio_chunk_tokens: 4}
+training: {seq_len: 64, global_batch_tokens: 512, batch_ramp_start_tokens: 512, warmup_positions: 2048,
+           batch_ramp_positions: 1, peak_lr: 0.003}
+runtime: {kv_block_tokens: 8}

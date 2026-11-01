@@ -1,0 +1,8 @@
+# Stages C/D (blueprint §8, §9): 32K -> 128K -> 256K with a lower peak learning rate.
+extends: full.yaml
+training:
+  seq_len: 131072
+  peak_lr: 0.00005  # long-context stages: 2e-5 .. 5e-5
+  warmup_positions: 200000000
+  batch_ramp_start_tokens: 8388608
+  global_batch_tokens: 8388608
